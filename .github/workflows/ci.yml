@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Both repos side by side, so file:../codehands-contracts resolves.
+      - uses: actions/checkout@v4
+        with: { path: codehands-runner }
+      - uses: actions/checkout@v4
+        with: { repository: imtahirabatool/codehands-contracts, path: codehands-contracts }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.17.1 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pnpm install && pnpm build
+        working-directory: codehands-contracts
+      - run: pnpm install && pnpm build && pnpm test
+        working-directory: codehands-runner

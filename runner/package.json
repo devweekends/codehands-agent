@@ -1,0 +1,31 @@
+{
+  "name": "@codehands/runner",
+  "version": "0.1.0",
+  "description": "Runs Claude Code or Codex in a git worktree per task and turns its output into events",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "fake": "tsx scripts/fake.ts"
+  },
+  "dependencies": {
+    "@codehands/contracts": "file:../../codehands-contracts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^3.2.4"
+  }
+}
