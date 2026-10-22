@@ -10,6 +10,7 @@ export interface SessionRecord {
   baseCommit?: string;
   pid?: number;
   lastSeq: number;
+  diff?: { patch: string; stat: string };
 }
 
 export class SessionStore {
@@ -30,11 +31,17 @@ export class SessionStore {
 
   // Refuses any move not in SESSION_TRANSITIONS, e.g. approving a running session.
   transition(sessionId: string, to: SessionStatus): SessionRecord {
+    const record = this.check(sessionId, to);
+    record.status = to;
+    return record;
+  }
+
+  // The same check without moving, for work that must happen before the move (commit, then approved).
+  check(sessionId: string, to: SessionStatus): SessionRecord {
     const record = this.get(sessionId);
     if (!canTransition(record.status, to)) {
       throw new Error(`illegal move for ${sessionId}: ${record.status} -> ${to}`);
     }
-    record.status = to;
     return record;
   }
 }

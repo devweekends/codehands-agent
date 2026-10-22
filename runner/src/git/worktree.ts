@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { execa } from "execa";
 
 // Week 1 guide, sections 6 and 7 (git worktree traps).
 
@@ -19,26 +20,38 @@ export function branchName(prompt: string, sessionId: string): string {
 }
 
 // Outside the repo, so worktrees never nest. Keep it short for Windows path limits.
-export function worktreePath(repoKey: string, sessionId: string): string {
-  return join(homedir(), ".codehands", "worktrees", repoKey, sessionId.slice(0, 8));
+export function worktreePath(repoKey: string, sessionId: string, root = join(homedir(), ".codehands", "worktrees")): string {
+  return join(root, repoKey, sessionId.slice(0, 8));
 }
 
-// TODO(Tue): `git rev-parse HEAD` in repoPath. Throw a clear error when the repo has no commits.
-export async function baseCommit(_repoPath: string): Promise<string> {
-  throw new Error("not implemented: baseCommit (Tue)");
+// Runs git in a folder and returns trimmed stdout. Throws with git's own message on failure.
+export async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execa("git", args, { cwd, stdin: "ignore" });
+  return stdout.trim();
 }
 
-// TODO(Tue): `git worktree add -b <branch> <path> <base>`. Always a new branch.
-export async function addWorktree(_repoPath: string, _branch: string, _path: string, _base: string): Promise<void> {
-  throw new Error("not implemented: addWorktree (Tue)");
+// A repo with no commits can't make worktrees, so say that plainly.
+export async function baseCommit(repoPath: string): Promise<string> {
+  try {
+    return await git(repoPath, ["rev-parse", "--verify", "HEAD"]);
+  } catch {
+    throw new Error(`${repoPath} is not a git repo or has no commits yet`);
+  }
 }
 
-// TODO(Wed): `git worktree remove --force <path>`, then `git branch -D <branch>` when rejecting.
-export async function removeWorktree(_repoPath: string, _path: string, _deleteBranch?: string): Promise<void> {
-  throw new Error("not implemented: removeWorktree (Wed)");
+// Always a new branch: one branch can only be checked out in one worktree.
+export async function addWorktree(repoPath: string, branch: string, path: string, base: string): Promise<void> {
+  await git(repoPath, ["worktree", "add", "-b", branch, path, base]);
 }
 
-// TODO(Tue): `git worktree prune`, run once when the runner starts.
-export async function pruneWorktrees(_repoPath: string): Promise<void> {
-  throw new Error("not implemented: pruneWorktrees (Tue)");
+// Approve keeps the branch, reject passes it to be deleted too.
+// If the folder was already deleted by hand, prune clears git's stale entry instead.
+export async function removeWorktree(repoPath: string, path: string, deleteBranch?: string): Promise<void> {
+  await git(repoPath, ["worktree", "remove", "--force", path]).catch(() => pruneWorktrees(repoPath));
+  if (deleteBranch) await git(repoPath, ["branch", "-D", deleteBranch]);
+}
+
+// Clears entries for worktree folders that were deleted by hand.
+export async function pruneWorktrees(repoPath: string): Promise<void> {
+  await git(repoPath, ["worktree", "prune"]);
 }

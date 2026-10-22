@@ -2,9 +2,14 @@
 // ~/.codehands/memory/<repoKey>/notes.md, repoKey = first 12 chars of sha1(origin url or absolute path).
 // Never write CLAUDE.md or AGENTS.md into the worktree, they would show up in the diff.
 
-// TODO(Fri): sha1 of `git remote get-url origin`, falling back to the absolute path.
-export async function repoKey(_repoPath: string): Promise<string> {
-  throw new Error("not implemented: repoKey (Fri)");
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { git } from "../git/worktree.js";
+
+// Also names the repo's worktree folder, so start() needs it before Friday.
+export async function repoKey(repoPath: string): Promise<string> {
+  const origin = await git(repoPath, ["remote", "get-url", "origin"]).catch(() => resolve(repoPath));
+  return createHash("sha1").update(origin).digest("hex").slice(0, 12);
 }
 
 // TODO(Fri): read notes.md, empty string if missing.

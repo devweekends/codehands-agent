@@ -17,10 +17,12 @@
     "prepare": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "fake": "tsx scripts/fake.ts"
+    "fake": "tsx scripts/fake.ts",
+    "try": "tsx scripts/try.ts"
   },
   "dependencies": {
-    "@codehands/contracts": "file:../../codehands-contracts"
+    "@codehands/contracts": "file:../../codehands-contracts",
+    "execa": "^10.2.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
