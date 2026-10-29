@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RunnerEvent, StartOptions } from "@codehands/contracts";
+import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { createRunner, type RunnerOptions } from "../src/index.js";
 
@@ -166,23 +166,35 @@ describe("runner diff, approve and reject", () => {
   });
 });
 
-describe("runner.stop", () => {
-  // A run whose agent hangs after task.started, with a child of its own, like claude -> npm test.
-  async function stoppedRun() {
-    const repo = makeRepo();
-    const o = options(repo);
-    const pidFile = join(tmp, `child-${o.sessionId}.pid`);
-    const runner = newRunner({ agentCommand: replayAgent(spike, 0, "hang", pidFile) });
-    const events: RunnerEvent[] = [];
-    let stopping: Promise<void> | undefined;
-    for await (const e of runner.start(o)) {
-      events.push(e);
-      if (e.type === "task.started") stopping = runner.stop(o.sessionId);
-    }
-    await stopping;
-    return { repo, o, runner, events, childPid: Number(readFileSync(pidFile, "utf8")) };
+// Reads a run to the end and calls stop() as soon as the agent has started.
+async function readAndStop(runner: Runner, sessionId: string, run: AsyncIterable<RunnerEvent>) {
+  const events: RunnerEvent[] = [];
+  let stopping: Promise<void> | undefined;
+  for await (const e of run) {
+    events.push(e);
+    if (e.type === "task.started") stopping = runner.stop(sessionId);
   }
+  await stopping;
+  return events;
+}
 
+// A run whose agent hangs after task.started, with a child of its own, like claude -> npm test.
+async function stoppedRun(runnerOptions: RunnerOptions = {}) {
+  const repo = makeRepo();
+  const o = options(repo);
+  const pidFile = join(tmp, `child-${o.sessionId}.pid`);
+  const runner = newRunner({ agentCommand: replayAgent(spike, 0, "hang", pidFile), ...runnerOptions });
+  const events = await readAndStop(runner, o.sessionId, runner.start(o));
+  return { repo, o, runner, events, childPid: Number(readFileSync(pidFile, "utf8")) };
+}
+
+async function drain(run: AsyncIterable<RunnerEvent>) {
+  const events: RunnerEvent[] = [];
+  for await (const e of run) events.push(e);
+  return events;
+}
+
+describe("runner.stop", () => {
   it("kills the agent and its children, and the stream ends with task.stopped", async () => {
     const { events, childPid } = await stoppedRun();
     expect(events.map((e) => e.type)).toEqual(["task.started", "task.stopped"]);
@@ -206,5 +218,52 @@ describe("runner.stop", () => {
     await collect(finished, {}, other);
     await expect(other.stop(finished.sessionId)).rejects.toThrow(/illegal move/); // awaiting approval
     await expect(other.stop(randomUUID())).rejects.toThrow(/unknown session/);
+  });
+});
+
+describe("runner.resume", () => {
+  const resumeWith = (mode = "", pidFile = ""): RunnerOptions["resumeCommand"] =>
+    () => ({ file: process.execPath, args: [replay, spike, "0", mode, pidFile] });
+
+  it("continues in the same worktree, seq carries on, and it ends awaiting approval", async () => {
+    const { repo, o, runner, events } = await stoppedRun({ resumeCommand: resumeWith("edit") });
+    const resumed = await drain(runner.resume(o.sessionId));
+
+    expect(resumed.at(-1)!.type).toBe("task.finished");
+    expect(resumed.at(-1)!.payload.diffStat).toMatch(/2 files changed/);
+    expect([...events, ...resumed].map((e) => e.seq)).toEqual([...events, ...resumed].map((_, i) => i + 1));
+
+    const { branch } = await runner.approve(o.sessionId, "Fix the failing test");
+    expect(git(repo, "show", "--name-only", "--format=", branch).split("\n").sort()).toEqual(["a.txt", "new.txt"]);
+  });
+
+  it("passes the prompt to the agent", async () => {
+    let seen = "";
+    const { o, runner } = await stoppedRun({
+      resumeCommand: (_o, prompt) => {
+        seen = prompt;
+        return { file: process.execPath, args: [replay, spike] };
+      },
+    });
+    await drain(runner.resume(o.sessionId, "Only fix the date test."));
+    expect(seen).toBe("Only fix the date test.");
+  });
+
+  it("can be stopped again, and numbering still carries on", async () => {
+    const pidFile = join(tmp, `resume-child-${randomUUID()}.pid`);
+    const { o, runner, events } = await stoppedRun({ resumeCommand: resumeWith("hang", pidFile) });
+    const resumed = await readAndStop(runner, o.sessionId, runner.resume(o.sessionId));
+
+    expect(resumed.map((e) => e.type)).toEqual(["task.started", "task.stopped"]);
+    expect(resumed.map((e) => e.seq)).toEqual([events.length + 1, events.length + 2]);
+    await vi.waitFor(() => expect(alive(Number(readFileSync(pidFile, "utf8")))).toBe(false), { timeout: 3000 });
+  });
+
+  it("refuses a session that is not stopped", async () => {
+    const o = options(makeRepo());
+    const runner = newRunner({ agentCommand: replayAgent(spike) });
+    await collect(o, {}, runner);
+    await expect(drain(runner.resume(o.sessionId))).rejects.toThrow(/illegal move/); // awaiting approval
+    await expect(drain(runner.resume(randomUUID()))).rejects.toThrow(/unknown session/);
   });
 });
