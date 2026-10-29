@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunnerEvent, StartOptions } from "@codehands/contracts";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createRunner, type RunnerOptions } from "../src/index.js";
 
 // start() against a throwaway git repo. The agent is a script that replays spike-1.jsonl, so no API cost.
@@ -40,8 +40,17 @@ async function collect(o: StartOptions, runnerOptions: RunnerOptions = {}, runne
 
 const newRunner = (runnerOptions: RunnerOptions = {}) => createRunner({ worktreeRoot: join(tmp, "worktrees"), ...runnerOptions });
 
-const replayAgent = (file: string, exitCode = 0, mode = ""): RunnerOptions["agentCommand"] =>
-  () => ({ file: process.execPath, args: [replay, file, String(exitCode), mode] });
+const replayAgent = (file: string, exitCode = 0, mode = "", pidFile = ""): RunnerOptions["agentCommand"] =>
+  () => ({ file: process.execPath, args: [replay, file, String(exitCode), mode, pidFile] });
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 describe("runner.start", () => {
   it("makes a worktree on a new branch, runs the agent there and streams its events", async () => {
@@ -154,5 +163,48 @@ describe("runner diff, approve and reject", () => {
     await collect(o, {}, runner);
     await expect(runner.approve(o.sessionId, "msg")).rejects.toThrow(/no worktree/);
     await expect(runner.reject(o.sessionId)).rejects.toThrow(/no worktree/);
+  });
+});
+
+describe("runner.stop", () => {
+  // A run whose agent hangs after task.started, with a child of its own, like claude -> npm test.
+  async function stoppedRun() {
+    const repo = makeRepo();
+    const o = options(repo);
+    const pidFile = join(tmp, `child-${o.sessionId}.pid`);
+    const runner = newRunner({ agentCommand: replayAgent(spike, 0, "hang", pidFile) });
+    const events: RunnerEvent[] = [];
+    let stopping: Promise<void> | undefined;
+    for await (const e of runner.start(o)) {
+      events.push(e);
+      if (e.type === "task.started") stopping = runner.stop(o.sessionId);
+    }
+    await stopping;
+    return { repo, o, runner, events, childPid: Number(readFileSync(pidFile, "utf8")) };
+  }
+
+  it("kills the agent and its children, and the stream ends with task.stopped", async () => {
+    const { events, childPid } = await stoppedRun();
+    expect(events.map((e) => e.type)).toEqual(["task.started", "task.stopped"]);
+    expect(events.map((e) => e.seq)).toEqual([1, 2]);
+    await vi.waitFor(() => expect(alive(childPid)).toBe(false), { timeout: 3000 });
+  });
+
+  it("keeps the worktree and the branch, so the session can resume", async () => {
+    const { repo, o } = await stoppedRun();
+    const short = o.sessionId.slice(0, 8);
+    expect(git(repo, "worktree", "list")).toContain(short);
+    expect(git(repo, "branch", "--list", `codehands/fix-the-failing-test-${short}`)).not.toBe("");
+  });
+
+  it("refuses to stop a session that is not running", async () => {
+    const { runner, o } = await stoppedRun();
+    await expect(runner.stop(o.sessionId)).rejects.toThrow(/illegal move/); // already stopped
+
+    const finished = options(makeRepo());
+    const other = newRunner({ agentCommand: replayAgent(spike) });
+    await collect(finished, {}, other);
+    await expect(other.stop(finished.sessionId)).rejects.toThrow(/illegal move/); // awaiting approval
+    await expect(other.stop(randomUUID())).rejects.toThrow(/unknown session/);
   });
 });

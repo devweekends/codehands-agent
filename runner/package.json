@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "@codehands/contracts": "file:../../codehands-contracts",
-    "execa": "^10.2.0"
+    "execa": "^10.2.0",
+    "tree-kill": "^1.2.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

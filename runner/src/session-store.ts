@@ -9,6 +9,7 @@ export interface SessionRecord {
   branch?: string;
   baseCommit?: string;
   pid?: number;
+  stopRequested?: boolean;  // set by stop(), so the agent's exit reads as task.stopped, not task.failed
   lastSeq: number;
   diff?: { patch: string; stat: string };
 }
