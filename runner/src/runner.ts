@@ -6,7 +6,8 @@ import { EventSequence } from "./events.js";
 import { commitAll, diffSince } from "./git/diff.js";
 import { addWorktree, baseCommit, branchName, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
 import { repoKey } from "./memory/notes.js";
-import { SessionStore } from "./session-store.js";
+import { stopProcessTree } from "./process/kill-tree.js";
+import { SessionStore, type SessionRecord } from "./session-store.js";
 
 // The real runner. Diagram 1c in the week 1 guide is the map for start().
 
@@ -20,18 +21,26 @@ const claudeCommand = (o: StartOptions) => ({ file: "claude", args: claudeArgs(o
 
 export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: RunnerOptions = {}): Runner {
   const store = new SessionStore();
+  // The running agent of each session, so stop() can wait for it to exit.
+  const exits = new Map<string, Promise<unknown>>();
 
-  async function* start(o: StartOptions): AsyncIterable<RunnerEvent> {
-    const record = store.create(o);
-    const seq = new EventSequence(o.sessionId);
+  // Every event goes through emit, so lastSeq is always right for resume().
+  function emitters(record: SessionRecord, seq: EventSequence) {
     const emit = (event: RunnerEvent) => {
       record.lastSeq = seq.last;
       return event;
     };
     const fail = (reason: string, extra: Record<string, unknown> = {}) => {
-      store.transition(o.sessionId, "failed");
+      store.transition(record.options.sessionId, "failed");
       return emit(seq.next("task.failed", { reason, ...extra }));
     };
+    return { emit, fail };
+  }
+
+  async function* start(o: StartOptions): AsyncIterable<RunnerEvent> {
+    const record = store.create(o);
+    const seq = new EventSequence(o.sessionId);
+    const { fail } = emitters(record, seq);
 
     if (o.agent !== "claude-code") {
       yield fail(`agent ${o.agent} is not supported yet`);
@@ -50,17 +59,26 @@ export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: Run
       return;
     }
     store.transition(o.sessionId, "running");
+    yield* runAgent(record, seq, agentCommand(o));
+  }
+
+  // Steps 2 to 5 of a run. start() and resume() share them, so a resumed run ends the same way.
+  async function* runAgent(record: SessionRecord, seq: EventSequence, { file, args }: { file: string; args: string[] }): AsyncIterable<RunnerEvent> {
+    const { sessionId } = record.options;
+    const { worktreePath, baseCommit } = worktreeOf(sessionId);
+    const { emit, fail } = emitters(record, seq);
+    record.stopRequested = false;
 
     // 2. Run the agent inside the copy. reject: false, so a crash or a missing binary is a result, not a throw.
-    const { file, args } = agentCommand(o);
     const child = execa(file, args, {
-      cwd: record.worktreePath,
+      cwd: worktreePath,
       stdin: "ignore",
       reject: false,
       buffer: { stdout: false, stderr: true },
       windowsHide: true,
     });
     record.pid = child.pid;
+    exits.set(sessionId, child);
 
     // 3. Every complete stdout line becomes events. readline never hands over half a line.
     //    The final event waits until the process is gone, so it can carry the diff.
@@ -76,6 +94,14 @@ export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: Run
     // 4. The process is done. No result line means it crashed or never started.
     const result = await child;
     record.pid = undefined;
+    exits.delete(sessionId);
+
+    // stop() killed it. The worktree stays so the session can resume.
+    if (record.stopRequested) {
+      if (record.status === "running") store.transition(sessionId, "stopped");
+      yield emit(seq.next("task.stopped", {}));
+      return;
+    }
     if (!finished) {
       yield fail("the agent exited without a result", {
         exitCode: result.exitCode,
@@ -85,19 +111,19 @@ export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: Run
       return;
     }
     if (finished.type === "task.failed") {
-      store.transition(o.sessionId, "failed");
+      store.transition(sessionId, "failed");
       yield emit(finished);
       return;
     }
 
     // 5. Store the change and put its summary on task.finished, so the phone shows it right away.
     try {
-      record.diff = await diffSince(record.worktreePath, record.baseCommit);
+      record.diff = await diffSince(worktreePath, baseCommit);
       finished.payload.diffStat = record.diff.stat;
     } catch (err) {
       finished.payload.diffError = (err as Error).message;
     }
-    store.transition(o.sessionId, "awaiting_approval");
+    store.transition(sessionId, "awaiting_approval");
     yield emit(finished);
   }
 
@@ -112,11 +138,17 @@ export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: Run
 
   return {
     start,
-    // TODO(Wed): stopProcessTree(pid), transition to stopped, yield task.stopped. Keep the worktree.
-    async stop() {
-      throw new Error("not implemented: stop (Wed)");
+    // Kills the agent and everything it started. task.stopped comes out of the start() stream,
+    // and the session is stopped by the time this resolves. The worktree stays.
+    async stop(sessionId) {
+      const record = store.check(sessionId, "stopped");
+      const exited = exits.get(sessionId);
+      if (!record.pid || !exited) throw new Error(`session ${sessionId} has no agent process to stop`);
+      record.stopRequested = true;
+      await stopProcessTree(record.pid, exited);
+      if (record.status === "running") store.transition(sessionId, "stopped");
     },
-    // TODO(Thu am): claudeResumeArgs in the same worktree, seq continues from lastSeq.
+    // TODO: runAgent(record, new EventSequence(id, record.lastSeq), claudeResumeArgs(...)) in the same worktree.
     resume() {
       throw new Error("not implemented: resume (Thu)");
     },
