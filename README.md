@@ -74,7 +74,7 @@ Week 1 (Oct 19 to 23, 2026).
 | Diff since the base commit, commit on approve | [runner/src/git/diff.ts](runner/src/git/diff.ts) | Done |
 | `start`, `diff`, `approve`, `reject` | [runner/src/runner.ts](runner/src/runner.ts) | Done, tested with real runs |
 | `stop`: kill the whole process tree, keep the worktree | [runner/src/process/kill-tree.ts](runner/src/process/kill-tree.ts) | Done. `task.stopped` comes out of the `start()` stream; `stop()` resolves once the session is `stopped` |
-| `resume`: same worktree, `seq` continues | [runner/src/runner.ts](runner/src/runner.ts) | To do. Throws `not implemented`. The `--resume` arguments exist |
+| `resume`: same worktree, `seq` continues | [runner/src/runner.ts](runner/src/runner.ts) | Done. Runs `claude -p --resume <sessionId>` through the same `runAgent()` as `start()`, so it ends in `awaiting_approval` or `task.failed` |
 | Codex: `codex exec --json` to events | [runner/src/agents/codex.ts](runner/src/agents/codex.ts) | To do. `start()` with `agent: "codex"` fails cleanly for now |
 | Repo notes read before a run, summary appended after | [runner/src/memory/notes.ts](runner/src/memory/notes.ts) | To do. `repoKey()` is done |
 
@@ -211,7 +211,7 @@ The scripts in `runner/scripts/`:
 | File | Covers |
 | --- | --- |
 | [claude-parser.test.ts](runner/test/claude-parser.test.ts) | The whole recorded run replays in order; each mapping above; blocked commands; failed tests hidden behind exit code 0; error results; broken lines; `raw` on every event |
-| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running |
+| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped |
 | [fake-runner.test.ts](runner/test/fake-runner.test.ts) | Event order and `seq`; approve only after finishing; stop then resume with `seq` continuing |
 | [worktree.test.ts](runner/test/worktree.test.ts) | Branch names |
 

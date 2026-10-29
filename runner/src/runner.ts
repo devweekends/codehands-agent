@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { execa } from "execa";
-import { claudeArgs, newClaudeParseState, parseClaudeLine } from "./agents/claude-code.js";
+import { claudeArgs, claudeResumeArgs, newClaudeParseState, parseClaudeLine } from "./agents/claude-code.js";
 import { EventSequence } from "./events.js";
 import { commitAll, diffSince } from "./git/diff.js";
 import { addWorktree, baseCommit, branchName, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
@@ -15,11 +15,19 @@ export interface RunnerOptions {
   worktreeRoot?: string;    // default ~/.codehands/worktrees
   // Which program to run for a task. Tests swap in a script that replays a recording.
   agentCommand?: (o: StartOptions) => { file: string; args: string[] };
+  resumeCommand?: (o: StartOptions, prompt: string) => { file: string; args: string[] };
 }
 
 const claudeCommand = (o: StartOptions) => ({ file: "claude", args: claudeArgs(o) });
+// start() passes our sessionId as Claude's --session-id, so the same id resumes it.
+const claudeResumeCommand = (o: StartOptions, prompt: string) =>
+  ({ file: "claude", args: claudeResumeArgs(o.sessionId, prompt, o.budgetUsd) });
 
-export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: RunnerOptions = {}): Runner {
+export function createRunner({
+  worktreeRoot,
+  agentCommand = claudeCommand,
+  resumeCommand = claudeResumeCommand,
+}: RunnerOptions = {}): Runner {
   const store = new SessionStore();
   // The running agent of each session, so stop() can wait for it to exit.
   const exits = new Map<string, Promise<unknown>>();
@@ -148,9 +156,11 @@ export function createRunner({ worktreeRoot, agentCommand = claudeCommand }: Run
       await stopProcessTree(record.pid, exited);
       if (record.status === "running") store.transition(sessionId, "stopped");
     },
-    // TODO: runAgent(record, new EventSequence(id, record.lastSeq), claudeResumeArgs(...)) in the same worktree.
-    resume() {
-      throw new Error("not implemented: resume (Thu)");
+    // Continues a stopped session in the same worktree. seq carries on from the last event,
+    // and the run ends the way start()'s does. If Claude never saved the session, it ends in task.failed.
+    async *resume(sessionId, prompt = "Continue.") {
+      const record = store.transition(sessionId, "running");
+      yield* runAgent(record, new EventSequence(sessionId, record.lastSeq), resumeCommand(record.options, prompt));
     },
     // The change since the base commit, new files included. Fresh each call while the worktree exists.
     async diff(sessionId) {
