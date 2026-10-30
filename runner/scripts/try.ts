@@ -40,7 +40,7 @@ if (!finished) process.exit(1);
 console.log(`\n${(await runner.diff(sessionId)).stat}\n`);
 
 let choice = flags.includes("--approve") ? "a" : flags.includes("--reject") ? "r" : "k";
-if (!flags.length && process.stdin.isTTY) {
+if (choice === "k" && process.stdin.isTTY) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   choice = (await rl.question("approve, reject or keep? [a/r/k] ")).trim().toLowerCase()[0] ?? "k";
   rl.close();
