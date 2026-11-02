@@ -15,7 +15,7 @@ describe("fake runner", () => {
     const runner = createFakeRunner({ delayMs: 0 });
     const events = await collect(runner.start(opts));
     expect(events[0]!.type).toBe("task.started");
-    expect(events.at(-1)!.type).toBe("task.finished");
+    expect(events.map((e) => e.type).slice(-2)).toEqual(["task.finished", "approval.requested"]);
     expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
   });
 
@@ -38,6 +38,16 @@ describe("fake runner", () => {
     expect(last.type).toBe("task.stopped");
     const resumed = await collect(runner.resume(opts.sessionId));
     expect(resumed[0]!.seq).toBe(last.seq + 1);
-    expect(resumed.at(-1)!.type).toBe("task.finished");
+    expect(resumed.map((e) => e.type).slice(-2)).toEqual(["task.finished", "approval.requested"]);
+  });
+
+  it("does not ask for approval when stopped", async () => {
+    const runner = createFakeRunner({ delayMs: 0 });
+    const it1 = runner.start(opts)[Symbol.asyncIterator]();
+    await it1.next();
+    await runner.stop(opts.sessionId);
+    const rest: RunnerEvent[] = [];
+    for (let r = await it1.next(); !r.done; r = await it1.next()) rest.push(r.value);
+    expect(rest.map((e) => e.type)).toEqual(["task.stopped"]);
   });
 });

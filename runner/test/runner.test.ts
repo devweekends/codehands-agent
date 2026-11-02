@@ -59,8 +59,8 @@ describe("runner.start", () => {
     const events = await collect(o, { agentCommand: replayAgent(spike) });
 
     expect(events[0]!.type).toBe("task.started");
-    expect(events.at(-1)!.type).toBe("task.finished");
-    expect(events).toHaveLength(17);
+    expect(events.map((e) => e.type).slice(-2)).toEqual(["task.finished", "approval.requested"]);
+    expect(events).toHaveLength(18);
     expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
     expect(events.every((e) => e.sessionId === o.sessionId)).toBe(true);
 
@@ -116,8 +116,10 @@ describe("runner diff, approve and reject", () => {
 
   it("puts the diff summary on task.finished and returns the full patch, new files included", async () => {
     const { runner, o, events } = await finishedRun();
-    expect(events.at(-1)!.type).toBe("task.finished");
-    expect(events.at(-1)!.payload.diffStat).toMatch(/2 files changed/);
+    const finished = events.at(-2)!;
+    expect(finished.type).toBe("task.finished");
+    expect(finished.payload.diffStat).toMatch(/2 files changed/);
+    expect(events.at(-1)).toMatchObject({ type: "approval.requested", payload: { diffStat: finished.payload.diffStat } });
     const { patch, stat } = await runner.diff(o.sessionId);
     expect(patch).toContain("+world");
     expect(patch).toContain("new.txt");
@@ -229,8 +231,8 @@ describe("runner.resume", () => {
     const { repo, o, runner, events } = await stoppedRun({ resumeCommand: resumeWith("edit") });
     const resumed = await drain(runner.resume(o.sessionId));
 
-    expect(resumed.at(-1)!.type).toBe("task.finished");
-    expect(resumed.at(-1)!.payload.diffStat).toMatch(/2 files changed/);
+    expect(resumed.map((e) => e.type).slice(-2)).toEqual(["task.finished", "approval.requested"]);
+    expect(resumed.at(-2)!.payload.diffStat).toMatch(/2 files changed/);
     expect([...events, ...resumed].map((e) => e.seq)).toEqual([...events, ...resumed].map((_, i) => i + 1));
 
     const { branch } = await runner.approve(o.sessionId, "Fix the failing test");

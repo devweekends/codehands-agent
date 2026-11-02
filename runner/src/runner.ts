@@ -125,6 +125,7 @@ export function createRunner({
     }
 
     // 5. Store the change and put its summary on task.finished, so the phone shows it right away.
+    //    Then ask for approval: the daemon shows Approve / Reject on approval.requested.
     try {
       record.diff = await diffSince(worktreePath, baseCommit);
       finished.payload.diffStat = record.diff.stat;
@@ -133,6 +134,7 @@ export function createRunner({
     }
     store.transition(sessionId, "awaiting_approval");
     yield emit(finished);
+    yield emit(seq.next("approval.requested", { diffStat: record.diff?.stat ?? "" }));
   }
 
   // Everything below needs the worktree that start() made.
