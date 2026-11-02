@@ -12,6 +12,9 @@ export interface FakeRunnerOptions {
 
 type Step = [RunnerEvent["type"], Record<string, unknown>];
 
+const FAKE_STAT = " src/date.js | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
+
+
 function script(prompt: string): Step[] {
   return [
     ["task.started", { agent: "claude-code", model: "fake", prompt }],
@@ -46,7 +49,12 @@ export function createFakeRunner({ delayMs = 300 }: FakeRunnerOptions = {}): Run
       store.get(sessionId).lastSeq = seq.last;
       yield event;
     }
-    if (!stopped.has(sessionId)) store.transition(sessionId, "awaiting_approval");
+
+    if (stopped.has(sessionId)) return;
+    store.transition(sessionId, "awaiting_approval");
+    const event = seq.next("approval.requested", { diffStat: FAKE_STAT });
+    store.get(sessionId).lastSeq = seq.last;
+    yield event;
   }
 
   return {
@@ -72,7 +80,7 @@ export function createFakeRunner({ delayMs = 300 }: FakeRunnerOptions = {}): Run
       store.get(sessionId);
       return {
         patch: "--- a/src/date.js\n+++ b/src/date.js\n@@ -1 +1 @@\n-  return d.getDate();\n+  return d.getUTCDate();\n",
-        stat: " src/date.js | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+        stat: FAKE_STAT
       };
     },
 
