@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { execa } from "execa";
@@ -5,7 +6,9 @@ import { claudeArgs, claudeResumeArgs, newClaudeParseState, parseClaudeLine } fr
 import { EventSequence } from "./events.js";
 import { commitAll, diffSince } from "./git/diff.js";
 import { addWorktree, baseCommit, branchName, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
-import { repoKey } from "./memory/notes.js";
+import { createFileMemory, repoKey } from "./memory/notes.js";
+import { detectRepoProfile } from "./memory/profile.js";
+import { notesForPrompt, runNote, type MemoryStore } from "./memory/store.js";
 import { stopProcessTree } from "./process/kill-tree.js";
 import { SessionStore, type SessionRecord } from "./session-store.js";
 
@@ -13,18 +16,21 @@ import { SessionStore, type SessionRecord } from "./session-store.js";
 
 export interface RunnerOptions {
   worktreeRoot?: string;    // default ~/.codehands/worktrees
+  memory?: MemoryStore;     // default: files under ~/.codehands/memory. Tests pass createMemoryStub()
   // Which program to run for a task. Tests swap in a script that replays a recording.
-  agentCommand?: (o: StartOptions) => { file: string; args: string[] };
+  // notes: the repo's memory for the prompt, undefined when there is none.
+  agentCommand?: (o: StartOptions, notes?: string) => { file: string; args: string[] };
   resumeCommand?: (o: StartOptions, prompt: string) => { file: string; args: string[] };
 }
 
-const claudeCommand = (o: StartOptions) => ({ file: "claude", args: claudeArgs(o) });
+const claudeCommand = (o: StartOptions, notes?: string) => ({ file: "claude", args: claudeArgs(o, notes) });
 // start() passes our sessionId as Claude's --session-id, so the same id resumes it.
 const claudeResumeCommand = (o: StartOptions, prompt: string) =>
   ({ file: "claude", args: claudeResumeArgs(o.sessionId, prompt, o.budgetUsd) });
 
 export function createRunner({
   worktreeRoot,
+  memory = createFileMemory(),
   agentCommand = claudeCommand,
   resumeCommand = claudeResumeCommand,
 }: RunnerOptions = {}): Runner {
@@ -59,15 +65,18 @@ export function createRunner({
     try {
       record.baseCommit = await baseCommit(o.repoPath);
       record.branch = branchName(o.prompt, o.sessionId);
-      record.worktreePath = worktreePath(await repoKey(o.repoPath), o.sessionId, worktreeRoot);
+      record.repoKey = await repoKey(o.repoPath);
+      record.worktreePath = worktreePath(record.repoKey, o.sessionId, worktreeRoot);
       await pruneWorktrees(o.repoPath);
       await addWorktree(o.repoPath, record.branch, record.worktreePath, record.baseCommit);
     } catch (err) {
       yield fail(`could not make the worktree: ${(err as Error).message}`);
       return;
     }
+    // Memory helps a run but must never fail one.
+    const notes = await loadMemory(record.repoKey!, record.worktreePath!).catch(() => undefined);
     store.transition(o.sessionId, "running");
-    yield* runAgent(record, seq, agentCommand(o));
+    yield* runAgent(record, seq, agentCommand(o, notes));
   }
 
   // Steps 2 to 5 of a run. start() and resume() share them, so a resumed run ends the same way.
@@ -132,6 +141,14 @@ export function createRunner({
     } catch (err) {
       finished.payload.diffError = (err as Error).message;
     }
+
+    if (record.repoKey) {
+      await memory.addNote(record.repoKey, {
+        id: randomUUID(), at: new Date().toISOString(), sessionId,
+        text: runNote(record.options.prompt, finished.payload, record.diff?.stat),
+      }).catch(() => {}); // memory never fails a run
+    }
+
     store.transition(sessionId, "awaiting_approval");
     yield emit(finished);
     yield emit(seq.next("approval.requested", { diffStat: record.diff?.stat ?? "" }));
@@ -144,6 +161,12 @@ export function createRunner({
       throw new Error(`session ${sessionId} has no worktree`);
     }
     return { record, worktreePath: record.worktreePath, baseCommit: record.baseCommit, branch: record.branch };
+  }
+
+  // Saves what the worktree looks like and returns the notes for the prompt.
+  async function loadMemory(key: string, worktree: string): Promise<string | undefined> {
+    await memory.saveProfile(key, await detectRepoProfile(worktree));
+    return notesForPrompt(await memory.notes(key));
   }
 
   return {
