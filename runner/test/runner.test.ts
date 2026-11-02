@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { createRunner, type RunnerOptions } from "../src/index.js";
+import { createMemoryStub, createRunner, repoKey, type RunnerOptions } from "../src/index.js";
 
 // start() against a throwaway git repo. The agent is a script that replays spike-1.jsonl, so no API cost.
 const replay = fileURLToPath(new URL("./helpers/replay-agent.mjs", import.meta.url));
@@ -38,7 +38,8 @@ async function collect(o: StartOptions, runnerOptions: RunnerOptions = {}, runne
   return events;
 }
 
-const newRunner = (runnerOptions: RunnerOptions = {}) => createRunner({ worktreeRoot: join(tmp, "worktrees"), ...runnerOptions });
+const newRunner = (runnerOptions: RunnerOptions = {}) =>
+  createRunner({ worktreeRoot: join(tmp, "worktrees"), memory: createMemoryStub(), ...runnerOptions });
 
 const replayAgent = (file: string, exitCode = 0, mode = "", pidFile = ""): RunnerOptions["agentCommand"] =>
   () => ({ file: process.execPath, args: [replay, file, String(exitCode), mode, pidFile] });
@@ -267,5 +268,46 @@ describe("runner.resume", () => {
     await collect(o, {}, runner);
     await expect(drain(runner.resume(o.sessionId))).rejects.toThrow(/illegal move/); // awaiting approval
     await expect(drain(runner.resume(randomUUID()))).rejects.toThrow(/unknown session/);
+  });
+});
+
+describe("runner memory", () => {
+  it("passes the first run's note to the second run", async () => {
+    const memory = createMemoryStub();
+    const seen: (string | undefined)[] = [];
+    const agentCommand: RunnerOptions["agentCommand"] = (_o, notes) => {
+      seen.push(notes);
+      return { file: process.execPath, args: [replay, spike] };
+    };
+    const runner = newRunner({ memory, agentCommand });
+    const repo = makeRepo();
+
+    await collect(options(repo), {}, runner);
+    await collect(options(repo, { prompt: "Second task" }), {}, runner);
+
+    expect(seen[0]).toBeUndefined(); // first run: nothing to remember yet
+    expect(seen[1]).toContain("Task: Fix the failing test");
+  });
+
+  it("saves the worktree's profile", async () => {
+    const memory = createMemoryStub();
+    const repo = makeRepo();
+    await collect(options(repo), { memory, agentCommand: replayAgent(spike) });
+    expect(await memory.profile(await repoKey(repo))).toMatchObject({ language: "unknown", nodeVersion: "22" });
+  });
+
+  it("writes no note when the run fails", async () => {
+    const memory = createMemoryStub();
+    const repo = makeRepo();
+    const empty = join(tmp, "empty-memory.jsonl");
+    writeFileSync(empty, "");
+    await collect(options(repo), { memory, agentCommand: replayAgent(empty, 1) });
+    expect(await memory.notes(await repoKey(repo))).toBe("");
+  });
+
+  it("writes no note when the run is stopped", async () => {
+    const memory = createMemoryStub();
+    const { repo } = await stoppedRun({ memory });
+    expect(await memory.notes(await repoKey(repo))).toBe("");
   });
 });

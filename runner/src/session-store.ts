@@ -6,6 +6,7 @@ export interface SessionRecord {
   options: StartOptions;
   status: SessionStatus;
   worktreePath?: string;
+  repoKey?: string;         // set by start(). Where this repo's memory lives
   branch?: string;
   baseCommit?: string;
   pid?: number;

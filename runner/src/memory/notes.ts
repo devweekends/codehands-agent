@@ -1,23 +1,48 @@
-// Week 1 guide, section 8. Friday.
-// ~/.codehands/memory/<repoKey>/notes.md, repoKey = first 12 chars of sha1(origin url or absolute path).
-// Never write CLAUDE.md or AGENTS.md into the worktree, they would show up in the diff.
-
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { git } from "../git/worktree.js";
+import type { RepoProfile } from "./profile.js";
+import { formatNote, trimNotes, type MemoryStore } from "./store.js";
 
-// Also names the repo's worktree folder, so start() needs it before Friday.
+// One id per repo: names its worktree folder and its memory folder.
 export async function repoKey(repoPath: string): Promise<string> {
   const origin = await git(repoPath, ["remote", "get-url", "origin"]).catch(() => resolve(repoPath));
   return createHash("sha1").update(origin).digest("hex").slice(0, 12);
 }
 
-// TODO(Fri): read notes.md, empty string if missing.
-export async function readNotes(_repoKey: string): Promise<string> {
-  throw new Error("not implemented: readNotes (Fri)");
+// Memory on disk: ~/.codehands/memory/<repoKey>/notes.md and profile.json.
+// Outside the worktree on purpose: CLAUDE.md or AGENTS.md there would show up in the diff.
+export function createFileMemory(root = join(homedir(), ".codehands", "memory")): MemoryStore {
+  const file = (key: string, name: string) => join(root, key, name);
+
+  return {
+    async notes(key) {
+      return (await readIfExists(file(key, "notes.md"))) ?? "";
+    },
+    async addNote(key, note) {
+      const old = (await readIfExists(file(key, "notes.md"))) ?? "";
+      await mkdir(join(root, key), { recursive: true });
+      await writeFile(file(key, "notes.md"), trimNotes(old + formatNote(note)));
+    },
+    async profile(key) {
+      const text = await readIfExists(file(key, "profile.json"));
+      return text ? (JSON.parse(text) as RepoProfile) : undefined;
+    },
+    async saveProfile(key, profile) {
+      await mkdir(join(root, key), { recursive: true });
+      await writeFile(file(key, "profile.json"), JSON.stringify(profile, null, 2));
+    },
+  };
 }
 
-// TODO(Fri): append a dated summary, keep the file under about 200 lines, drop oldest first.
-export async function appendNotes(_repoKey: string, _entry: string): Promise<void> {
-  throw new Error("not implemented: appendNotes (Fri)");
+// undefined when the file isn't there. Any other error is real, so it throws.
+async function readIfExists(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
 }
