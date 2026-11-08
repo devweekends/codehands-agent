@@ -6,3 +6,5 @@ export { branchName, slugify } from "./git/worktree.js";
 export { createMemoryStub, formatNote, notesForPrompt, runNote, trimNotes, type MemoryNote, type MemoryStore } from "./memory/store.js";
 export { createFileMemory, repoKey } from "./memory/notes.js";
 export { detectRepoProfile, type RepoProfile } from "./memory/profile.js";
+export { runInSandbox, type SandboxOptions, type SandboxResult, type SandboxError } from "./runtime/sandbox.js";
+export { dockerArgs, installArgs, dockerAvailable, hostTimeZone, DEFAULT_LIMITS, type BoxLimits } from "./runtime/docker.js";
