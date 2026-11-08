@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { execa } from "execa";
 import { claudeArgs, claudeResumeArgs, newClaudeParseState, parseClaudeLine } from "./agents/claude-code.js";
 import { EventSequence } from "./events.js";
 import { commitAll, diffSince } from "./git/diff.js";
-import { addWorktree, baseCommit, branchName, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
+import { addWorktree, baseCommit, branchName, git, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
 import { createFileMemory, repoKey } from "./memory/notes.js";
 import { detectRepoProfile } from "./memory/profile.js";
 import { notesForPrompt, runNote, type MemoryStore } from "./memory/store.js";
@@ -16,11 +19,23 @@ import { SessionStore, type SessionRecord } from "./session-store.js";
 
 export interface RunnerOptions {
   worktreeRoot?: string;    // default ~/.codehands/worktrees
+  sessionRoot?: string;     // default ~/.codehands/sessions. Session records, so they outlive a restart
   memory?: MemoryStore;     // default: files under ~/.codehands/memory. Tests pass createMemoryStub()
   // Which program to run for a task. Tests swap in a script that replays a recording.
   // notes: the repo's memory for the prompt, undefined when there is none.
   agentCommand?: (o: StartOptions, notes?: string) => { file: string; args: string[] };
   resumeCommand?: (o: StartOptions, prompt: string) => { file: string; args: string[] };
+}
+
+// What recover() did. failed: sessions a restart interrupted, for the daemon to mark failed too.
+// cleanupErrors: sessions it couldn't clean up. They stay on disk and the next recover() tries again.
+export interface RecoveryReport {
+  failed: string[];
+  cleanupErrors: { sessionId: string; reason: string }[];
+}
+
+export interface RecoverableRunner extends Runner {
+  recover(): Promise<RecoveryReport>;
 }
 
 const claudeCommand = (o: StartOptions, notes?: string) => ({ file: "claude", args: claudeArgs(o, notes) });
@@ -30,11 +45,12 @@ const claudeResumeCommand = (o: StartOptions, prompt: string) =>
 
 export function createRunner({
   worktreeRoot,
+  sessionRoot = join(homedir(), ".codehands", "sessions"),
   memory = createFileMemory(),
   agentCommand = claudeCommand,
   resumeCommand = claudeResumeCommand,
-}: RunnerOptions = {}): Runner {
-  const store = new SessionStore();
+}: RunnerOptions = {}): RecoverableRunner {
+  const store = new SessionStore(sessionRoot);
   // The running agent of each session, so stop() can wait for it to exit.
   const exits = new Map<string, Promise<unknown>>();
 
@@ -42,6 +58,7 @@ export function createRunner({
   function emitters(record: SessionRecord, seq: EventSequence) {
     const emit = (event: RunnerEvent) => {
       record.lastSeq = seq.last;
+      store.save(record);
       return event;
     };
     const fail = (reason: string, extra: Record<string, unknown> = {}) => {
@@ -67,6 +84,7 @@ export function createRunner({
       record.branch = branchName(o.prompt, o.sessionId);
       record.repoKey = await repoKey(o.repoPath);
       record.worktreePath = worktreePath(record.repoKey, o.sessionId, worktreeRoot);
+      store.save(record); // before the worktree exists, so a crash here can't leave one nobody knows about
       await pruneWorktrees(o.repoPath);
       await addWorktree(o.repoPath, record.branch, record.worktreePath, record.baseCommit);
     } catch (err) {
@@ -169,8 +187,40 @@ export function createRunner({
     return notesForPrompt(await memory.notes(key));
   }
 
+  // A failed session can't be approved or rejected, so nothing else would remove its worktree.
+  async function discardWorktree(record: SessionRecord): Promise<void> {
+    const { repoPath } = record.options;
+    await removeWorktree(repoPath, record.worktreePath!);
+    if (existsSync(record.worktreePath!)) throw new Error(`could not remove ${record.worktreePath}`);
+    // The branch goes only if it never moved: commits the agent made are kept.
+    const tip = await git(repoPath, ["rev-parse", "--verify", "--quiet", `refs/heads/${record.branch}`]).catch(() => "");
+    if (tip && tip === record.baseCommit) await git(repoPath, ["branch", "-D", record.branch!]);
+    record.worktreePath = undefined;
+    store.save(record);
+  }
+
   return {
     start,
+    // Call once when the daemon starts, before it starts or commands anything.
+    // A session still marked queued or running lost its agent, so it becomes failed.
+    // awaiting_approval and stopped sessions are left alone: approve, reject and resume still work.
+    async recover() {
+      const report: RecoveryReport = { failed: [], cleanupErrors: [] };
+      for (const sessionId of store.ids()) {
+        if (exits.has(sessionId)) continue; // its agent is alive in this process
+        try {
+          const record = store.get(sessionId);
+          if (record.status === "queued" || record.status === "running") {
+            store.transition(sessionId, "failed");
+            report.failed.push(sessionId);
+          }
+          if (record.status === "failed" && record.worktreePath) await discardWorktree(record);
+        } catch (err) {
+          report.cleanupErrors.push({ sessionId, reason: (err as Error).message });
+        }
+      }
+      return report;
+    },
     // Kills the agent and everything it started. task.stopped comes out of the start() stream,
     // and the session is stopped by the time this resolves. The worktree stays.
     async stop(sessionId) {

@@ -39,7 +39,7 @@ async function collect(o: StartOptions, runnerOptions: RunnerOptions = {}, runne
 }
 
 const newRunner = (runnerOptions: RunnerOptions = {}) =>
-  createRunner({ worktreeRoot: join(tmp, "worktrees"), memory: createMemoryStub(), ...runnerOptions });
+  createRunner({ worktreeRoot: join(tmp, "worktrees"), sessionRoot: join(tmp, "sessions"), memory: createMemoryStub(), ...runnerOptions });
 
 const replayAgent = (file: string, exitCode = 0, mode = "", pidFile = ""): RunnerOptions["agentCommand"] =>
   () => ({ file: process.execPath, args: [replay, file, String(exitCode), mode, pidFile] });
@@ -268,6 +268,150 @@ describe("runner.resume", () => {
     await collect(o, {}, runner);
     await expect(drain(runner.resume(o.sessionId))).rejects.toThrow(/illegal move/); // awaiting approval
     await expect(drain(runner.resume(randomUUID()))).rejects.toThrow(/unknown session/);
+  });
+});
+
+describe("runner after a restart", () => {
+  // A new runner on the same sessionRoot is what a restarted daemon gets.
+  const sessionRootOf = () => ({ sessionRoot: mkdtempSync(join(tmp, "sessions-")) });
+  const worktreeOf = (repo: string, sessionId: string) => git(repo, "worktree", "list", "--porcelain").split("\n")
+    .filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9)).find((p) => p.includes(sessionId.slice(0, 8)));
+  const branchOf = (o: StartOptions) => `codehands/fix-the-failing-test-${o.sessionId.slice(0, 8)}`;
+
+  async function finished(roots: RunnerOptions) {
+    const repo = makeRepo();
+    const o = options(repo);
+    await collect(o, { ...roots, agentCommand: replayAgent(spike, 0, "edit") });
+    return { repo, o };
+  }
+
+  // The daemon died mid-run: the file still says running.
+  function markRunning(sessionRoot: string, sessionId: string) {
+    const file = join(sessionRoot, `${sessionId}.json`);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), status: "running" }));
+  }
+
+  it("approves a session from before the restart", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await finished(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+
+    const { branch, commit } = await newRunner(roots).approve(o.sessionId, "Fix the failing test");
+    expect(git(repo, "rev-parse", branch)).toBe(commit);
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  it("rejects a session from before the restart", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await finished(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+
+    await newRunner(roots).reject(o.sessionId);
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(repo, "branch", "--list", branchOf(o))).toBe("");
+  });
+
+  it("still shows the diff, and remembers a session is finished", async () => {
+    const roots = sessionRootOf();
+    const { o } = await finished(roots);
+    const restarted = newRunner(roots);
+    expect((await restarted.diff(o.sessionId)).patch).toContain("+world");
+
+    await restarted.approve(o.sessionId, "Fix the failing test");
+    const again = newRunner(roots);
+    expect((await again.diff(o.sessionId)).patch).toContain("+world");
+    await expect(again.approve(o.sessionId, "again")).rejects.toThrow(/illegal move/);
+  });
+
+  it("resumes a stopped session, and seq carries on", async () => {
+    const roots = sessionRootOf();
+    const { o, events } = await stoppedRun(roots);
+    const restarted = newRunner({ ...roots, resumeCommand: () => ({ file: process.execPath, args: [replay, spike, "0", "edit"] }) });
+
+    const resumed = await drain(restarted.resume(o.sessionId));
+    expect(resumed[0]!.seq).toBe(events.length + 1);
+    expect(resumed.at(-1)!.type).toBe("approval.requested");
+  });
+
+  it("recover fails an interrupted session and removes its worktree and empty branch", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await stoppedRun(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+    markRunning(roots.sessionRoot, o.sessionId);
+
+    const restarted = newRunner(roots);
+    expect(await restarted.recover()).toEqual({ failed: [o.sessionId], cleanupErrors: [] });
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(repo, "branch", "--list", branchOf(o))).toBe("");
+    await expect(restarted.approve(o.sessionId, "msg")).rejects.toThrow(/no worktree/);
+    expect(await restarted.recover()).toEqual({ failed: [], cleanupErrors: [] });
+  });
+
+  it("recover keeps a branch the agent committed to", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await stoppedRun(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+    writeFileSync(join(worktree, "partial.txt"), "work\n");
+    git(worktree, "add", "-A");
+    git(worktree, "commit", "-q", "-m", "partial");
+    markRunning(roots.sessionRoot, o.sessionId);
+
+    await newRunner(roots).recover();
+    expect(existsSync(worktree)).toBe(false);
+    expect(git(repo, "log", "-1", "--format=%s", branchOf(o))).toBe("partial");
+  });
+
+  it("recover removes the worktree of a run that had already failed", async () => {
+    const roots = sessionRootOf();
+    const repo = makeRepo();
+    const o = options(repo);
+    const empty = join(tmp, "empty-recover.jsonl");
+    writeFileSync(empty, "");
+    await collect(o, { ...roots, agentCommand: replayAgent(empty, 1) });
+    const worktree = worktreeOf(repo, o.sessionId)!;
+    expect(existsSync(worktree)).toBe(true);
+
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  it("recover leaves sessions alone that can still be approved or resumed", async () => {
+    const roots = sessionRootOf();
+    const waiting = await finished(roots);
+    const stopped = await stoppedRun(roots);
+
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(existsSync(worktreeOf(waiting.repo, waiting.o.sessionId)!)).toBe(true);
+    expect(existsSync(worktreeOf(stopped.repo, stopped.o.sessionId)!)).toBe(true);
+  });
+
+  it("recover reports a worktree it can't remove, and tries again next time", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await stoppedRun(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+    git(repo, "worktree", "lock", worktree); // git refuses, like a folder a live process has open
+    markRunning(roots.sessionRoot, o.sessionId);
+
+    const first = await newRunner(roots).recover();
+    expect(first.failed).toEqual([o.sessionId]);
+    expect(first.cleanupErrors.map((e) => e.sessionId)).toEqual([o.sessionId]);
+    expect(existsSync(worktree)).toBe(true);
+
+    git(repo, "worktree", "unlock", worktree);
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  it("recover carries on past a session it can't read", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await stoppedRun(roots);
+    markRunning(roots.sessionRoot, o.sessionId);
+    writeFileSync(join(roots.sessionRoot, "broken.json"), "{ not json");
+
+    const report = await newRunner(roots).recover();
+    expect(report.failed).toEqual([o.sessionId]);
+    expect(report.cleanupErrors.map((e) => e.sessionId)).toEqual(["broken"]);
+    expect(worktreeOf(repo, o.sessionId)).toBeUndefined();
   });
 });
 

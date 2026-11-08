@@ -69,7 +69,8 @@ Week 1 (Oct 19 to 23, 2026), plus the first part of week 2.
 | Piece | File | State |
 | --- | --- | --- |
 | Fake runner, the stand-in the daemon builds against | [runner/src/fake-runner.ts](runner/src/fake-runner.ts) | Done |
-| Session records and legal state moves | [runner/src/session-store.ts](runner/src/session-store.ts) | Done |
+| Session records and legal state moves | [runner/src/session-store.ts](runner/src/session-store.ts) | Done. The real runner saves them under `~/.codehands/sessions`, so they outlive a restart |
+| `recover()`: clean up after a restart | [runner/src/runner.ts](runner/src/runner.ts) | Done. Not in the contract's `Runner`: the daemon calls it once at startup, on the type `createRunner` returns |
 | `seq` 1, 2, 3 … per session | [runner/src/events.ts](runner/src/events.ts) | Done |
 | Claude Code arguments and stream-json parser | [runner/src/agents/claude-code.ts](runner/src/agents/claude-code.ts) | Done, tested against a recorded run |
 | Worktrees: branch names, add, remove, prune | [runner/src/git/worktree.ts](runner/src/git/worktree.ts) | Done |
@@ -113,17 +114,20 @@ const { branch, commit } = await runner.approve(sessionId, "Fix the date bug");
 
 | Export | What |
 | --- | --- |
-| `createRunner(options?)` | The real runner. `worktreeRoot` overrides `~/.codehands/worktrees`. `memory` swaps where repo memory lives (default: files under `~/.codehands/memory`). `agentCommand` swaps the program it runs, which is how the tests replay a recording instead of calling Claude |
+| `createRunner(options?)` | The real runner. `worktreeRoot` overrides `~/.codehands/worktrees`. `sessionRoot` overrides `~/.codehands/sessions`. `memory` swaps where repo memory lives (default: files under `~/.codehands/memory`). `agentCommand` swaps the program it runs, which is how the tests replay a recording instead of calling Claude |
 | `createFakeRunner({ delayMs? })` | Emits 12 scripted events, 300 ms apart, then `approval.requested`, and supports every method including stop and resume. Costs nothing, needs no repo. Build against it, and keep it as the demo backup |
 | `EventSequence` | Hands out events with the next `seq` |
-| `SessionStore`, `SessionRecord` | In-memory session records with the legal-move check from the contracts |
+| `SessionStore`, `SessionRecord` | Session records with the legal-move check from the contracts. Saved as files when given a root, otherwise in memory (the fake runner) |
+| `RecoverableRunner`, `RecoveryReport` | What `createRunner` returns: the contract's `Runner` plus `recover()`, and what `recover()` reports |
 | `branchName(prompt, sessionId)`, `slugify(text)` | `codehands/fix-the-failing-test-3f2a9c1e` |
 | `MemoryStore`, `createMemoryStub()`, `createFileMemory(root?)` | Repo memory: `notes`, `addNote`, `profile`, `saveProfile`. The stub keeps it in a `Map` for tests |
 | `formatNote`, `runNote`, `trimNotes`, `notesForPrompt` | How a note is written, built from a run, trimmed to about 200 lines, and capped at 6,000 characters for the prompt |
 | `detectRepoProfile(dir)`, `RepoProfile` | What a repo is, read from its files. Never throws: an unknown repo gives `language: "unknown"` |
 | `repoKey(repoPath)` | The repo's id, which names its worktree and memory folders |
 
-The runner keeps session records in memory only. The daemon owns the real database. A runner that restarts forgets its sessions; stop, resume and crash recovery are where that changes.
+The daemon owns the real database. The runner keeps only what it needs to finish a session, in `~/.codehands/sessions/<sessionId>.json`, so `approve`, `reject`, `resume` and `diff` still work after a restart. The agent itself does not survive one.
+
+When the daemon starts it should call `recover()` once, before anything else. Sessions still marked `queued` or `running` become `failed`, and their ids come back in `report.failed`. Failed sessions lose their worktree, along with anything uncommitted in it, because `failed` is final and nothing else would remove it. Their branch goes too, unless the agent committed to it. `awaiting_approval` and `stopped` sessions are left alone. A worktree that can't be removed comes back in `report.cleanupErrors` and is tried again next time.
 
 ### How Claude Code's output becomes events
 
@@ -222,7 +226,8 @@ The scripts in `runner/scripts/`:
 | File | Covers |
 | --- | --- |
 | [claude-parser.test.ts](runner/test/claude-parser.test.ts) | The whole recorded run replays in order; each mapping above; blocked commands; failed tests hidden behind exit code 0; error results; broken lines; `raw` on every event |
-| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note |
+| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note; after a restart: approve, reject, diff and resume still work, and `recover()` fails interrupted sessions, removes their worktrees, keeps branches with commits, leaves live sessions alone, and reports what it can't clean or read |
+| [session-store.test.ts](runner/test/session-store.test.ts) | A new store finds what the old one saved; the pid is never saved; moves are still checked after loading; ids that aren't plain names never reach the disk; no root means memory only |
 | [fake-runner.test.ts](runner/test/fake-runner.test.ts) | Event order and `seq`; approve only after finishing; stop then resume with `seq` continuing; no `approval.requested` after a stop |
 | [memory.test.ts](runner/test/memory.test.ts) | The stub keeps notes in order and repos apart; trimming drops whole notes and keeps the newest; the prompt cap keeps the newest end; a note's summary stays on one line; the file store reads back from disk and treats missing files as empty |
 | [profile.test.ts](runner/test/profile.test.ts) | npm, pnpm, npm's placeholder test script, `.nvmrc`, `engines.node`, needs install, broken `package.json`, Python, empty folder |
