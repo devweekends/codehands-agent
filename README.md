@@ -69,7 +69,8 @@ Week 1 (Oct 19 to 23, 2026), plus the first part of week 2.
 | Piece | File | State |
 | --- | --- | --- |
 | Fake runner, the stand-in the daemon builds against | [runner/src/fake-runner.ts](runner/src/fake-runner.ts) | Done |
-| Session records and legal state moves | [runner/src/session-store.ts](runner/src/session-store.ts) | Done |
+| Session records and legal state moves | [runner/src/session-store.ts](runner/src/session-store.ts) | Done. The real runner saves them under `~/.codehands/sessions`, so they outlive a restart |
+| `recover()`: clean up after a restart | [runner/src/runner.ts](runner/src/runner.ts) | Done. Not in the contract's `Runner`: the daemon calls it once at startup, on the type `createRunner` returns |
 | `seq` 1, 2, 3 … per session | [runner/src/events.ts](runner/src/events.ts) | Done |
 | Claude Code arguments and stream-json parser | [runner/src/agents/claude-code.ts](runner/src/agents/claude-code.ts) | Done, tested against a recorded run |
 | Worktrees: branch names, add, remove, prune | [runner/src/git/worktree.ts](runner/src/git/worktree.ts) | Done |
@@ -80,7 +81,8 @@ Week 1 (Oct 19 to 23, 2026), plus the first part of week 2.
 | Codex: `codex exec --json` to events | [runner/src/agents/codex.ts](runner/src/agents/codex.ts) | To do. `start()` with `agent: "codex"` fails cleanly for now |
 | `approval.requested` after `task.finished` | [runner/src/runner.ts](runner/src/runner.ts) | Done (contracts v0.2.0). Real and fake runners, never after a stop or a failure |
 | Repo memory: notes read before a run, a note added after | [runner/src/memory/](runner/src/memory/) | Done. `MemoryStore` with an in-memory stub and a file store. Stopped and failed runs add nothing, and a memory error never fails a run |
-| Repo profile: language, package manager, test command, Node version | [runner/src/memory/profile.ts](runner/src/memory/profile.ts) | Done. Read from files in the worktree, no model call. The sandbox reads it next |
+| Repo profile: language, package manager, test command, Node version | [runner/src/memory/profile.ts](runner/src/memory/profile.ts) | Done. Read from files in the worktree, no model call. The sandbox uses it to pick the image and decide whether to install |
+| Sandbox: run a repo's tests in a locked Docker box | [runner/src/runtime/](runner/src/runtime/) | Done. `runInSandbox()`: no network, 1 GB with no swap, 1 CPU, 256 processes, read-only repo and system, non-root, your timezone, 60 s. npm only. Nothing calls it yet: the engine's test step will |
 
 Next, from the [design](https://github.com/devweekends/codehands-docs#who-owns-what): a model per phase, naming provider errors as one `provider.status` event (`rate_limited`, `auth_expired`, `usage_limit`, `subscription_inactive`, `down`), memory and user preferences, and two models on one task.
 
@@ -113,17 +115,25 @@ const { branch, commit } = await runner.approve(sessionId, "Fix the date bug");
 
 | Export | What |
 | --- | --- |
-| `createRunner(options?)` | The real runner. `worktreeRoot` overrides `~/.codehands/worktrees`. `memory` swaps where repo memory lives (default: files under `~/.codehands/memory`). `agentCommand` swaps the program it runs, which is how the tests replay a recording instead of calling Claude |
+| `createRunner(options?)` | The real runner. `worktreeRoot` overrides `~/.codehands/worktrees`. `sessionRoot` overrides `~/.codehands/sessions`. `memory` swaps where repo memory lives (default: files under `~/.codehands/memory`). `agentCommand` swaps the program it runs, which is how the tests replay a recording instead of calling Claude |
 | `createFakeRunner({ delayMs? })` | Emits 12 scripted events, 300 ms apart, then `approval.requested`, and supports every method including stop and resume. Costs nothing, needs no repo. Build against it, and keep it as the demo backup |
 | `EventSequence` | Hands out events with the next `seq` |
-| `SessionStore`, `SessionRecord` | In-memory session records with the legal-move check from the contracts |
+| `SessionStore`, `SessionRecord` | Session records with the legal-move check from the contracts. Saved as files when given a root, otherwise in memory (the fake runner) |
+| `RecoverableRunner`, `RecoveryReport` | What `createRunner` returns: the contract's `Runner` plus `recover()`, and what `recover()` reports |
 | `branchName(prompt, sessionId)`, `slugify(text)` | `codehands/fix-the-failing-test-3f2a9c1e` |
 | `MemoryStore`, `createMemoryStub()`, `createFileMemory(root?)` | Repo memory: `notes`, `addNote`, `profile`, `saveProfile`. The stub keeps it in a `Map` for tests |
 | `formatNote`, `runNote`, `trimNotes`, `notesForPrompt` | How a note is written, built from a run, trimmed to about 200 lines, and capped at 6,000 characters for the prompt |
 | `detectRepoProfile(dir)`, `RepoProfile` | What a repo is, read from its files. Never throws: an unknown repo gives `language: "unknown"` |
 | `repoKey(repoPath)` | The repo's id, which names its worktree and memory folders |
+| `runInSandbox(options)`, `SandboxOptions`, `SandboxResult`, `SandboxError` | Runs the repo's test command in the locked Docker box and returns a result. Never throws: failing tests are `passed: false`, and a box that couldn't run them sets `error` (`sandbox.unavailable`, `sandbox.unsupported`, `sandbox.failed`, `install.failed`) |
+| `dockerArgs()`, `installArgs()`, `DEFAULT_LIMITS`, `BoxLimits` | The exact `docker run` flags for the test box and the install box, as plain data |
+| `dockerAvailable(docker?)`, `hostTimeZone()` | Whether the Docker engine answers within 5 s, and your IANA timezone (`Asia/Karachi`, not Windows' own name) |
 
-The runner keeps session records in memory only. The daemon owns the real database. A runner that restarts forgets its sessions; stop, resume and crash recovery are where that changes.
+When a repo needs its dependencies, a separate install box runs first, with the network on but the repo's install scripts off, then the test box runs with no network. `node_modules` must be git-ignored, or the sandbox refuses: everything not ignored lands in the commit you approve.
+
+The daemon owns the real database. The runner keeps only what it needs to finish a session, in `~/.codehands/sessions/<sessionId>.json`, so `approve`, `reject`, `resume` and `diff` still work after a restart. The agent itself does not survive one.
+
+When the daemon starts it should call `recover()` once, before anything else. Sessions still marked `queued` or `running` become `failed`, and their ids come back in `report.failed`. Failed sessions lose their worktree, along with anything uncommitted in it, because `failed` is final and nothing else would remove it. Their branch goes too, unless the agent committed to it. `awaiting_approval` and `stopped` sessions are left alone. A worktree that can't be removed comes back in `report.cleanupErrors` and is tried again next time.
 
 ### How Claude Code's output becomes events
 
@@ -157,6 +167,9 @@ Some details that matter:
 | `~/.codehands/worktrees/<repoKey>/<first 8 of sessionId>` | The task's worktree. Outside your repo so worktrees never nest, and short because of Windows path limits |
 | `~/.codehands/memory/<repoKey>/notes.md` | Per-repo notes, newest last, trimmed to about 200 lines by dropping the oldest whole notes |
 | `~/.codehands/memory/<repoKey>/profile.json` | The repo profile from the latest run |
+| `~/.codehands/sessions/<sessionId>.json` | What the runner needs to finish a session after a restart |
+| `~/.codehands/runs/<sessionId>/test-<n>.json` | Each sandbox test run: passed, exit code, timed out, out of memory, the last 64 KB of output |
+| Docker containers `ch-<first 8 of sessionId>-<n>` | One per sandbox run, removed right after. `-install` on the end for the install box |
 | `codehands/<slug>-<first 8 of sessionId>` | The task's branch, in your repo |
 
 `repoKey` is the first 12 characters of the SHA-1 of the repo's `origin` URL, or of its absolute path when there is no origin. Two clones of the same repo share a key.
@@ -165,7 +178,7 @@ All of it stays on this machine. Memory reaches Claude only as `--append-system-
 
 ## Safety rules
 
-The agent runs on your machine with no sandbox until the Docker box lands in week 2. Until then:
+Tests run in the locked Docker box when the engine calls `runInSandbox()`. Claude Code itself still runs on your machine, not in a box, so:
 
 - **Run it only on our own repos.**
 - Claude runs with `--permission-mode acceptEdits` and a short allow list: `Read, Edit, Write, Glob, Grep`, and only `npm test` in Bash or PowerShell. Anything else is blocked and shows up as a `message` with `denied: true`.
@@ -177,7 +190,7 @@ The agent runs on your machine with no sandbox until the Docker box lands in wee
 
 ## Set up
 
-You need Node 22, pnpm 10, Git, and for real runs the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI, logged in.
+You need Node 22, pnpm 10, Git, and for real runs the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI, logged in. For the sandbox, Docker Desktop must be running. Without it, the sandbox tests are skipped, not failed.
 
 The runner depends on the contracts by folder in week 1, so clone both side by side:
 
@@ -202,7 +215,8 @@ Run these in `runner/`.
 
 | Command | What | Costs money |
 | --- | --- | --- |
-| `pnpm test` | Every test. The parser replays a recorded run, the runner tests make real git repos in a temp folder and use a stand-in for `claude` | No |
+| `pnpm test` | Every test. The parser replays a recorded run, the runner tests make real git repos in a temp folder and use a stand-in for `claude`, and the sandbox tests start real containers when Docker is running | No |
+| `pnpm sandbox [repoPath] [--tz <zone>]` | Runs a repo's tests in the locked box once and prints the result. Defaults to the fixture. `--tz UTC` shows why the box needs your timezone | No |
 | `pnpm fake` | Prints the fake runner's events, one JSON object per line. This is exactly what the daemon receives | No |
 | `pnpm try [repoPath] [prompt] [--approve \| --reject]` | One real run through the runner, one line per event, then the diff stat, then approve, reject or keep | Yes, capped at $0.50 |
 | `pnpm build` | Compiles to `dist/` | No |
@@ -222,11 +236,14 @@ The scripts in `runner/scripts/`:
 | File | Covers |
 | --- | --- |
 | [claude-parser.test.ts](runner/test/claude-parser.test.ts) | The whole recorded run replays in order; each mapping above; blocked commands; failed tests hidden behind exit code 0; error results; broken lines; `raw` on every event |
-| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note |
+| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note; after a restart: approve, reject, diff and resume still work, and `recover()` fails interrupted sessions, removes their worktrees, keeps branches with commits, leaves live sessions alone, and reports what it can't clean or read |
+| [session-store.test.ts](runner/test/session-store.test.ts) | A new store finds what the old one saved; the pid is never saved; moves are still checked after loading; ids that aren't plain names never reach the disk; no root means memory only |
 | [fake-runner.test.ts](runner/test/fake-runner.test.ts) | Event order and `seq`; approve only after finishing; stop then resume with `seq` continuing; no `approval.requested` after a stop |
 | [memory.test.ts](runner/test/memory.test.ts) | The stub keeps notes in order and repos apart; trimming drops whole notes and keeps the newest; the prompt cap keeps the newest end; a note's summary stays on one line; the file store reads back from disk and treats missing files as empty |
 | [profile.test.ts](runner/test/profile.test.ts) | npm, pnpm, npm's placeholder test script, `.nvmrc`, `engines.node`, needs install, broken `package.json`, Python, empty folder |
 | [worktree.test.ts](runner/test/worktree.test.ts) | Branch names |
+| [docker-args.test.ts](runner/test/docker-args.test.ts) | Every security flag of the test box and the install box, with no Docker needed, so a lost flag fails in milliseconds |
+| [sandbox.test.ts](runner/test/sandbox.test.ts) | Real containers, skipped when Docker is off: pass and fail; a test that never ends is killed and nothing is left behind, even when the kill misses; out of memory; no network; read-only repo and system; the 64 KB output cap; timezone; result files numbered across restarts; no false pass from a leftover container; `sandbox.failed` when the box can't start; install, with no install scripts and no lockfile added; a failed install; `node_modules` not git-ignored; Docker unavailable |
 
 To record a new fixture, run `scripts/spike.sh` (or a Codex equivalent), read every line of the output, then write tests that replay it. Never call a real agent from a test.
 
@@ -240,10 +257,6 @@ To record a new fixture, run `scripts/spike.sh` (or a Codex equivalent), read ev
 | Cannot find module `@codehands/contracts` | Build the contracts repo first, and check it is cloned next to `codehands-agent` |
 | Child processes keep running after a stop on Windows | Killing the parent does not kill its children (`claude` → `npm test` → `node`). That is what `stopProcessTree` is for |
 | "nothing to approve: the agent made no changes" | The agent changed no files. Reject the session instead |
-
-## Contributing
-
-- One branch per Linear issue, for example `tahira/cod-12-runner-start`. Put the issue id in the PR title.
-- `main` is always green. CI runs build and test on every PR.
-- A change to `StartOptions`, `RunnerEvent` or `Runner` is a contract change. It goes to [codehands-contracts](https://github.com/devweekends/codehands-contracts#changing-a-contract) first, and `createFakeRunner()` is updated the same week.
-- The week by week plan is in [roadmap/tahira.md](https://github.com/devweekends/codehands-docs/blob/main/roadmap/tahira.md).
+| `sandbox.unavailable` | Docker Desktop isn't running. Start it and try again |
+| `sandbox.failed` | The box broke, not your code. `message` and `output` say why: often a wrong image tag from `.nvmrc`, or no internet for the first image pull |
+| "add node_modules/ to .gitignore first" | The sandbox won't install into a repo that doesn't ignore `node_modules`, because it would land in the commit |
