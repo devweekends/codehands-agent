@@ -123,7 +123,8 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
   }
 
   if (o.type === "result") {
-    const failed = o.is_error === true || o.subtype !== "success";
+    const resultText = typeof o.result === "string" ? o.result : "";
+    const failed = o.is_error === true || o.subtype !== "success" || /not logged in|please run \/login/i.test(resultText);
     return [seq.next(failed ? "task.failed" : "task.finished", {
       subtype: o.subtype,
       total_cost_usd: o.total_cost_usd,
@@ -131,6 +132,7 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
       num_turns: o.num_turns,
       usage: o.usage,
       result: o.result,
+      reason: failed ? resultText : undefined,
       agentSessionId: o.session_id,
     }, o)];
   }
