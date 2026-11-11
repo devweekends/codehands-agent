@@ -19,7 +19,8 @@
     "test": "vitest run",
     "fake": "tsx scripts/fake.ts",
     "try": "tsx scripts/try.ts",
-    "sandbox": "tsx scripts/sandbox.ts"
+    "sandbox": "tsx scripts/sandbox.ts",
+    "engine": "tsx scripts/engine.ts"
   },
   "dependencies": {
     "@codehands/contracts": "file:../../codehands-contracts",

@@ -8,3 +8,6 @@ export { createFileMemory, repoKey } from "./memory/notes.js";
 export { detectRepoProfile, type RepoProfile } from "./memory/profile.js";
 export { runInSandbox, type SandboxOptions, type SandboxResult, type SandboxError } from "./runtime/sandbox.js";
 export { dockerArgs, installArgs, dockerAvailable, hostTimeZone, DEFAULT_LIMITS, type BoxLimits } from "./runtime/docker.js";
+export { createEngine, modelFor, DEFAULT_MODEL, type EngineOptions } from "./engine/engine.js";
+export { createClaudeModel, createCannedModel, claudeModelArgs, parseClaudeJson, type ModelClient, type ModelRequest, type ModelReply, type ClaudeModelOptions } from "./engine/model.js";
+export { analyzePrompt, planPrompt, implementPrompt, reviewPrompt, parseVerdict, type Prompt, type Verdict } from "./engine/prompts.js";

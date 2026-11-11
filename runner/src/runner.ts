@@ -36,6 +36,7 @@ export interface RecoveryReport {
 
 export interface RecoverableRunner extends Runner {
   recover(): Promise<RecoveryReport>;
+  worktree(sessionId: string): string | undefined;
 }
 
 const claudeCommand = (o: StartOptions, notes?: string) => ({ file: "claude", args: claudeArgs(o, notes) });
@@ -201,6 +202,14 @@ export function createRunner({
 
   return {
     start,
+    // Where the session's change is, for whoever runs the tests. undefined when there is none.
+    worktree(sessionId) {
+      try {
+        return store.get(sessionId).worktreePath;
+      } catch {
+        return undefined;
+      }
+    },
     // Call once when the daemon starts, before it starts or commands anything.
     // A session still marked queued or running lost its agent, so it becomes failed.
     // awaiting_approval and stopped sessions are left alone: approve, reject and resume still work.
