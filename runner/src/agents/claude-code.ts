@@ -42,7 +42,8 @@ export function claudeResumeArgs(sessionId: string, prompt: string, budgetUsd = 
 //   assistant tool_use Edit/Write   -> file.changed
 //   assistant tool_use Bash/PowerShell -> command.started (Claude uses PowerShell on Windows)
 //   user tool_result for a command  -> command.finished (+ test.result for a test command)
-//   result                          -> task.finished, or task.failed when it is an error.
+//   result                          -> task.finished, or task.failed when it is an error
+//                                      or a login failure reported as success.
 //                                      total_cost_usd and usage exactly as given
 // Skipped: rate_limit_event (can come before init), thinking, other system lines.
 // A line that is not JSON becomes a `message` with the raw text. Always keep `raw`.
@@ -54,6 +55,9 @@ const COMMAND_TOOLS = new Set(["Bash", "PowerShell"]);
 const TEST_COMMAND = /\b(npm|pnpm|yarn)( run)? test\b|\bnode --test\b|\b(vitest|jest|pytest)\b/;
 // Exit codes can hide behind a pipe (`npm test | tail`), so the output is checked too.
 const TEST_FAILED = /^# fail [1-9]|\b[1-9]\d* (failed|failing)\b|^FAIL\b/m;
+// Claude can report a login problem as a "success" result. Match only that whole message,
+// so a summary that merely mentions login ("users who are not logged in …") still finishes.
+const AUTH_FAILURE = /^\s*(not logged in|invalid api key)\b.*please run \/login\s*$/i;
 
 // Results can arrive out of order, so a tool_result is matched to its tool_use by id.
 export interface ClaudeParseState {
@@ -123,8 +127,8 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
   }
 
   if (o.type === "result") {
-    const resultText = typeof o.result === "string" ? o.result : "";
-    const failed = o.is_error === true || o.subtype !== "success" || /not logged in|please run \/login/i.test(resultText);
+    const summary = typeof o.result === "string" ? o.result : "";
+    const failed = o.is_error === true || o.subtype !== "success" || AUTH_FAILURE.test(summary);
     return [seq.next(failed ? "task.failed" : "task.finished", {
       subtype: o.subtype,
       total_cost_usd: o.total_cost_usd,
@@ -132,7 +136,7 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
       num_turns: o.num_turns,
       usage: o.usage,
       result: o.result,
-      reason: failed ? resultText : undefined,
+      reason: failed ? summary || o.subtype : undefined,
       agentSessionId: o.session_id,
     }, o)];
   }
