@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
+import type { Runner, RunnerEvent, SessionStatus, StartOptions } from "@codehands/contracts";
 import { execa } from "execa";
 import { claudeArgs, claudeResumeArgs, newClaudeParseState, parseClaudeLine } from "./agents/claude-code.js";
 import { EventSequence } from "./events.js";
@@ -29,14 +29,23 @@ export interface RunnerOptions {
 
 // What recover() did. failed: sessions a restart interrupted, for the daemon to mark failed too.
 // cleanupErrors: sessions it couldn't clean up. They stay on disk and the next recover() tries again.
+// resumable: interrupted sessions that were kept instead, for the daemon to resume().
 export interface RecoveryReport {
   failed: string[];
   cleanupErrors: { sessionId: string; reason: string }[];
+  resumable: string[];
+}
+
+export interface RecoverOptions {
+  // A running session this says yes to is kept as stopped, with its worktree, instead of failed.
+  // The engine uses it for its implement step: it continues that session after the restart.
+  keep?: (sessionId: string) => boolean;
 }
 
 export interface RecoverableRunner extends Runner {
-  recover(): Promise<RecoveryReport>;
+  recover(o?: RecoverOptions): Promise<RecoveryReport>;
   worktree(sessionId: string): string | undefined;
+  status(sessionId: string): SessionStatus | undefined;
 }
 
 const claudeCommand = (o: StartOptions, notes?: string) => ({ file: "claude", args: claudeArgs(o, notes) });
@@ -210,15 +219,29 @@ export function createRunner({
         return undefined;
       }
     },
+    // Where the session stands, or undefined when there is no such session.
+    status(sessionId) {
+      try {
+        return store.get(sessionId).status;
+      } catch {
+        return undefined;
+      }
+    },
     // Call once when the daemon starts, before it starts or commands anything.
-    // A session still marked queued or running lost its agent, so it becomes failed.
+    // A session still marked queued or running lost its agent, so it becomes failed,
+    // unless keep() says its owner will continue it: then it becomes stopped, worktree and all.
     // awaiting_approval and stopped sessions are left alone: approve, reject and resume still work.
-    async recover() {
-      const report: RecoveryReport = { failed: [], cleanupErrors: [] };
+    async recover({ keep = () => false }: RecoverOptions = {}) {
+      const report: RecoveryReport = { failed: [], cleanupErrors: [], resumable: [] };
       for (const sessionId of store.ids()) {
         if (exits.has(sessionId)) continue; // its agent is alive in this process
         try {
           const record = store.get(sessionId);
+          if (record.status === "running" && record.worktreePath && keep(sessionId)) {
+            store.transition(sessionId, "stopped");
+            report.resumable.push(sessionId);
+            continue;
+          }
           if (record.status === "queued" || record.status === "running") {
             store.transition(sessionId, "failed");
             report.failed.push(sessionId);

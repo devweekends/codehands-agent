@@ -1,4 +1,4 @@
-export { createRunner, type RecoverableRunner, type RecoveryReport, type RunnerOptions } from "./runner.js";
+export { createRunner, type RecoverableRunner, type RecoveryReport, type RecoverOptions, type RunnerOptions } from "./runner.js";
 export { createFakeRunner, type FakeRunnerOptions } from "./fake-runner.js";
 export { EventSequence } from "./events.js";
 export { SessionStore, type SessionRecord } from "./session-store.js";
@@ -11,3 +11,4 @@ export { dockerArgs, installArgs, dockerAvailable, hostTimeZone, DEFAULT_LIMITS,
 export { createEngine, modelFor, DEFAULT_MODEL, type EngineOptions } from "./engine/engine.js";
 export { createClaudeModel, createCannedModel, claudeModelArgs, parseClaudeJson, type ModelClient, type ModelRequest, type ModelReply, type ClaudeModelOptions } from "./engine/model.js";
 export { analyzePrompt, planPrompt, implementPrompt, reviewPrompt, parseVerdict, type Prompt, type Verdict } from "./engine/prompts.js";
+export { RunStore, type RunState } from "./engine/run-store.js";

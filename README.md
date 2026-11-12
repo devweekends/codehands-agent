@@ -64,7 +64,7 @@ When it ends:
 
 ## Status
 
-Week 1 (Oct 19 to 23, 2026), plus the first part of week 2.
+Through week 4 (Nov 2026): the runner, the sandbox, the engine and crash resume.
 
 | Piece | File | State |
 | --- | --- | --- |
@@ -82,7 +82,9 @@ Week 1 (Oct 19 to 23, 2026), plus the first part of week 2.
 | `approval.requested` after `task.finished` | [runner/src/runner.ts](runner/src/runner.ts) | Done (contracts v0.2.0). Real and fake runners, never after a stop or a failure |
 | Repo memory: notes read before a run, a note added after | [runner/src/memory/](runner/src/memory/) | Done. `MemoryStore` with an in-memory stub and a file store. Stopped and failed runs add nothing, and a memory error never fails a run |
 | Repo profile: language, package manager, test command, Node version | [runner/src/memory/profile.ts](runner/src/memory/profile.ts) | Done. Read from files in the worktree, no model call. The sandbox uses it to pick the image and decide whether to install |
-| Sandbox: run a repo's tests in a locked Docker box | [runner/src/runtime/](runner/src/runtime/) | Done. `runInSandbox()`: no network, 1 GB with no swap, 1 CPU, 256 processes, read-only repo and system, non-root, your timezone, 60 s. npm only. Nothing calls it yet: the engine's test step will |
+| Sandbox: run a repo's tests in a locked Docker box | [runner/src/runtime/](runner/src/runtime/) | Done. `runInSandbox()`: no network, 1 GB with no swap, 1 CPU, 256 processes, read-only repo and system, non-root, your timezone, 60 s. npm only. The engine's test step calls it |
+| Engine: analyze → plan → implement → test → review | [runner/src/engine/](runner/src/engine/) | Done. `createEngine()` is a `Runner` for `agent: "codehands"`. Claude Code does implement through the runner, the sandbox does test, and one model call each does analyze, plan and review. Once the change exists, nothing after it throws it away: failing tests or a failed review still end in `awaiting_approval` |
+| Crash resume: kill the daemon, it finishes anyway | [runner/src/engine/run-store.ts](runner/src/engine/run-store.ts) | Done. The engine saves `run.json` before every event. After a restart, `engine.recover()` lists the runs a crash cut off, and `resume()` carries on from the first step that didn't finish: no step is paid for twice, Claude Code's own session is continued, `seq` never repeats, and `approve` waits for test and review |
 
 Next, from the [design](https://github.com/devweekends/codehands-docs#who-owns-what): a model per phase, naming provider errors as one `provider.status` event (`rate_limited`, `auth_expired`, `usage_limit`, `subscription_inactive`, `down`), memory and user preferences, and two models on one task.
 
@@ -119,7 +121,10 @@ const { branch, commit } = await runner.approve(sessionId, "Fix the date bug");
 | `createFakeRunner({ delayMs? })` | Emits 12 scripted events, 300 ms apart, then `approval.requested`, and supports every method including stop and resume. Costs nothing, needs no repo. Build against it, and keep it as the demo backup |
 | `EventSequence` | Hands out events with the next `seq` |
 | `SessionStore`, `SessionRecord` | Session records with the legal-move check from the contracts. Saved as files when given a root, otherwise in memory (the fake runner) |
-| `RecoverableRunner`, `RecoveryReport` | What `createRunner` returns: the contract's `Runner` plus `recover()`, and what `recover()` reports |
+| `RecoverableRunner`, `RecoveryReport`, `RecoverOptions` | What `createRunner` and `createEngine` return: the contract's `Runner` plus `recover()`, `worktree()` and `status()`. `recover({ keep })` keeps a running session its owner will continue as `stopped` instead of failing it, and lists it in `report.resumable` |
+| `createEngine(options?)`, `EngineOptions`, `modelFor`, `DEFAULT_MODEL` | The engine. `runner`, `model`, `sandbox`, `memory` and `runsRoot` can each be swapped, which is how the tests run it for $0. `modelFor(o, step)`: the step's own model, then the run's, then the default |
+| `RunStore`, `RunState` | The engine's `run.json`: each finished step's result, the run's status, and the last `seq` sent |
+| `createClaudeModel()`, `createCannedModel(answers)`, `ModelClient` | Who answers analyze, plan and review: `claude -p` with no tools, or fixed text for tests and `--free` |
 | `branchName(prompt, sessionId)`, `slugify(text)` | `codehands/fix-the-failing-test-3f2a9c1e` |
 | `MemoryStore`, `createMemoryStub()`, `createFileMemory(root?)` | Repo memory: `notes`, `addNote`, `profile`, `saveProfile`. The stub keeps it in a `Map` for tests |
 | `formatNote`, `runNote`, `trimNotes`, `notesForPrompt` | How a note is written, built from a run, trimmed to about 200 lines, and capped at 6,000 characters for the prompt |
@@ -134,6 +139,8 @@ When a repo needs its dependencies, a separate install box runs first, with the 
 The daemon owns the real database. The runner keeps only what it needs to finish a session, in `~/.codehands/sessions/<sessionId>.json`, so `approve`, `reject`, `resume` and `diff` still work after a restart. The agent itself does not survive one.
 
 When the daemon starts it should call `recover()` once, before anything else. Sessions still marked `queued` or `running` become `failed`, and their ids come back in `report.failed`. Failed sessions lose their worktree, along with anything uncommitted in it, because `failed` is final and nothing else would remove it. Their branch goes too, unless the agent committed to it. `awaiting_approval` and `stopped` sessions are left alone. A worktree that can't be removed comes back in `report.cleanupErrors` and is tried again next time.
+
+**With the engine (Midhat):** on startup call `engine.recover()`, not `runner.recover()` (the engine calls the runner's itself), then `resume()` every id in `report.resumable`. Each resume is a normal event stream: store its events like any run's.
 
 ### How Claude Code's output becomes events
 
@@ -168,6 +175,8 @@ Some details that matter:
 | `~/.codehands/memory/<repoKey>/notes.md` | Per-repo notes, newest last, trimmed to about 200 lines by dropping the oldest whole notes |
 | `~/.codehands/memory/<repoKey>/profile.json` | The repo profile from the latest run |
 | `~/.codehands/sessions/<sessionId>.json` | What the runner needs to finish a session after a restart |
+| `~/.codehands/runs/<sessionId>/run.json` | The engine's saved state: each finished step's result, the status and the last `seq`. Written before every event, through a temp file, so a crash never leaves half of it |
+| `~/.codehands/runs/<sessionId>/<n>-<step>.json` | One file per engine step: what went in, what came out, model, cost and time |
 | `~/.codehands/runs/<sessionId>/test-<n>.json` | Each sandbox test run: passed, exit code, timed out, out of memory, the last 64 KB of output |
 | Docker containers `ch-<first 8 of sessionId>-<n>` | One per sandbox run, removed right after. `-install` on the end for the install box |
 | `codehands/<slug>-<first 8 of sessionId>` | The task's branch, in your repo |
@@ -219,6 +228,8 @@ Run these in `runner/`.
 | `pnpm sandbox [repoPath] [--tz <zone>]` | Runs a repo's tests in the locked box once and prints the result. Defaults to the fixture. `--tz UTC` shows why the box needs your timezone | No |
 | `pnpm fake` | Prints the fake runner's events, one JSON object per line. This is exactly what the daemon receives | No |
 | `pnpm try [repoPath] [prompt] [--approve \| --reject]` | One real run through the runner, one line per event, then the diff stat, then approve, reject or keep | Yes, capped at $0.50 |
+| `pnpm engine [repoPath] [prompt] [--free | --canned] [--wrong-fix] [--slow] [--approve | --reject]` | One run through the engine, one event per line. `--free` costs nothing: canned thinking, the recorded Claude run as implement, and the real Docker box. `--canned` pays only for implement. `--wrong-fix` shows failing tests. `--slow` waits 10 s in every step so you can kill it halfway | Only without `--free` |
+| `pnpm engine --recover [--free | --canned] [--approve | --reject]` | What the daemon does after a restart: finds the runs a crash cut off and finishes them. Use the same flags the run started with | Only without `--free` |
 | `pnpm build` | Compiles to `dist/` | No |
 | `pnpm typecheck` | Type check only | No |
 
@@ -236,7 +247,9 @@ The scripts in `runner/scripts/`:
 | File | Covers |
 | --- | --- |
 | [claude-parser.test.ts](runner/test/claude-parser.test.ts) | The whole recorded run replays in order; each mapping above; blocked commands; failed tests hidden behind exit code 0; error results; broken lines; `raw` on every event |
-| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note; after a restart: approve, reject, diff and resume still work, and `recover()` fails interrupted sessions, removes their worktrees, keeps branches with commits, leaves live sessions alone, and reports what it can't clean or read |
+| [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note; after a restart: approve, reject, diff and resume still work, and `recover()` fails interrupted sessions, removes their worktrees, keeps branches with commits, leaves live sessions alone, and reports what it can't clean or read; `recover({ keep })` keeps a session as `stopped` and it resumes; `status()` |
+| [engine.test.ts](runner/test/engine.test.ts) | The five steps in order ending in `awaiting_approval`; Claude Code's events tagged with the step; each step gets the one before; model per step; a file per step and `run.json`; wrong agent and a repo with no commits; analyze, implement, tests, sandbox and review failing, with the change kept once it exists; Claude Code's own failure says why; approve waits for the whole run; reject; stop during implement and resume; tests run in the worktree with the change |
+| [engine-recover.test.ts](runner/test/engine-recover.test.ts) | A crash at every point: during analyze, after plan, during implement (Claude Code's session continued), right after Claude Code finished, during review, between `task.finished` and `approval.requested`. Each time no finished step runs again and `seq` carries on. Approve refused until the run finishes; finished and failed runs not resumed; a run stopped before the restart still resumes; a second resume refused; `RunStore` never reads outside its folder |
 | [session-store.test.ts](runner/test/session-store.test.ts) | A new store finds what the old one saved; the pid is never saved; moves are still checked after loading; ids that aren't plain names never reach the disk; no root means memory only |
 | [fake-runner.test.ts](runner/test/fake-runner.test.ts) | Event order and `seq`; approve only after finishing; stop then resume with `seq` continuing; no `approval.requested` after a stop |
 | [memory.test.ts](runner/test/memory.test.ts) | The stub keeps notes in order and repos apart; trimming drops whole notes and keeps the newest; the prompt cap keeps the newest end; a note's summary stays on one line; the file store reads back from disk and treats missing files as empty |

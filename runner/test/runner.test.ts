@@ -340,11 +340,11 @@ describe("runner after a restart", () => {
     markRunning(roots.sessionRoot, o.sessionId);
 
     const restarted = newRunner(roots);
-    expect(await restarted.recover()).toEqual({ failed: [o.sessionId], cleanupErrors: [] });
+    expect(await restarted.recover()).toEqual({ failed: [o.sessionId], cleanupErrors: [], resumable: [] });
     expect(existsSync(worktree)).toBe(false);
     expect(git(repo, "branch", "--list", branchOf(o))).toBe("");
     await expect(restarted.approve(o.sessionId, "msg")).rejects.toThrow(/no worktree/);
-    expect(await restarted.recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(await restarted.recover()).toEqual({ failed: [], cleanupErrors: [], resumable: [] });
   });
 
   it("recover keeps a branch the agent committed to", async () => {
@@ -371,7 +371,7 @@ describe("runner after a restart", () => {
     const worktree = worktreeOf(repo, o.sessionId)!;
     expect(existsSync(worktree)).toBe(true);
 
-    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [], resumable: [] });
     expect(existsSync(worktree)).toBe(false);
   });
 
@@ -380,7 +380,7 @@ describe("runner after a restart", () => {
     const waiting = await finished(roots);
     const stopped = await stoppedRun(roots);
 
-    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [], resumable: [] });
     expect(existsSync(worktreeOf(waiting.repo, waiting.o.sessionId)!)).toBe(true);
     expect(existsSync(worktreeOf(stopped.repo, stopped.o.sessionId)!)).toBe(true);
   });
@@ -398,7 +398,7 @@ describe("runner after a restart", () => {
     expect(existsSync(worktree)).toBe(true);
 
     git(repo, "worktree", "unlock", worktree);
-    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [] });
+    expect(await newRunner(roots).recover()).toEqual({ failed: [], cleanupErrors: [], resumable: [] });
     expect(existsSync(worktree)).toBe(false);
   });
 
@@ -412,6 +412,27 @@ describe("runner after a restart", () => {
     expect(report.failed).toEqual([o.sessionId]);
     expect(report.cleanupErrors.map((e) => e.sessionId)).toEqual(["broken"]);
     expect(worktreeOf(repo, o.sessionId)).toBeUndefined();
+  });
+
+  it("recover keeps an interrupted session that keep() claims, and it resumes", async () => {
+    const roots = sessionRootOf();
+    const { repo, o } = await stoppedRun(roots);
+    const worktree = worktreeOf(repo, o.sessionId)!;
+    markRunning(roots.sessionRoot, o.sessionId);
+
+    const restarted = newRunner({ ...roots, resumeCommand: replayAgent(spike, 0, "edit") });
+    expect(await restarted.recover({ keep: (id) => id === o.sessionId })).toEqual({ failed: [], cleanupErrors: [], resumable: [o.sessionId] });
+    expect(restarted.status(o.sessionId)).toBe("stopped");
+    expect(existsSync(worktree)).toBe(true);
+    const resumed = await drain(restarted.resume(o.sessionId));
+    expect(resumed.at(-1)!.type).toBe("approval.requested");
+  });
+
+  it("status says where a session stands, and undefined for one it doesn't know", async () => {
+    const roots = sessionRootOf();
+    const { o } = await finished(roots);
+    expect(newRunner(roots).status(o.sessionId)).toBe("awaiting_approval");
+    expect(newRunner(roots).status(randomUUID())).toBeUndefined();
   });
 });
 
