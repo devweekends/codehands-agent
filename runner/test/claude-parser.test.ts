@@ -71,6 +71,25 @@ describe("parseClaudeLine", () => {
     expect(e!.payload.total_cost_usd).toBe(0.5);
   });
 
+  it("falls back to the subtype as reason when an error result has no text", () => {
+    const [e] = replay([JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true })]);
+    expect(e!.payload.reason).toBe("error_max_budget_usd");
+  });
+
+  it("maps a login failure reported as success to task.failed", () => {
+    const result = "Not logged in · Please run /login";
+    const [e] = replay([JSON.stringify({ type: "result", subtype: "success", is_error: false, result })]);
+    expect(e!.type).toBe("task.failed");
+    expect(e!.payload.reason).toBe(result);
+  });
+
+  it("keeps a successful summary that only mentions login as task.finished", () => {
+    const result = "Fixed the redirect so users who are not logged in go to /signin. Please run /login to test.";
+    const [e] = replay([JSON.stringify({ type: "result", subtype: "success", is_error: false, result })]);
+    expect(e!.type).toBe("task.finished");
+    expect(e!.payload.reason).toBeUndefined();
+  });
+
   it("turns a malformed or half-finished line into a message with the raw text, and skips blank lines", () => {
     const half = lines[1]!.slice(0, 40);
     const out = replay(["not json", half, "", "   "]);
