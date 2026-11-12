@@ -133,7 +133,7 @@ describe("engine.start", () => {
         const o = options(makeRepo());
         await drain(engine.start(o));
         const dir = join(runsRoot, o.sessionId);
-        expect(readdirSync(dir).sort()).toEqual(["1-analyze.json", "2-plan.json", "3-implement.json", "4-test.json", "5-review.json"]);
+        expect(readdirSync(dir).sort()).toEqual(["1-analyze.json", "2-plan.json", "3-implement.json", "4-test.json", "5-review.json", "run.json"]);
         expect(JSON.parse(readFileSync(join(dir, "2-plan.json"), "utf8"))).toMatchObject({ step: "plan", ok: true, output: "1. PLAN" });
         expect(JSON.parse(readFileSync(join(dir, "3-implement.json"), "utf8")).diffStat).toMatch(/2 files changed/);
     });
@@ -167,7 +167,15 @@ describe("engine when something goes wrong", () => {
         const { engine } = setup({ runner: { agentCommand: () => ({ file: process.execPath, args: [replay, empty, "1"] }) } });
         const events = await drain(engine.start(options(makeRepo())));
         expect(steps(events).at(-1)).toBe("<implement x");
-        expect(events.at(-1)).toMatchObject({ type: "task.failed", payload: { step: "implement", reason: "the agent exited without a result" } });
+        expect(events.at(-1)).toMatchObject({ type: "task.failed", payload: { step: "implement", reason: "implement: the agent exited without a result" } });
+    });
+    
+    it("Claude Code's own failure says why, like every other step", async () => {
+        const failed = join(tmp, "claude-error.jsonl");
+        writeFileSync(failed, JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "No conversation found" }) + "\n");
+        const { engine } = setup({ runner: { agentCommand: () => ({ file: process.execPath, args: [replay, failed, "1"] }) } });
+        const events = await drain(engine.start(options(makeRepo())));
+        expect(events.at(-1)).toMatchObject({ type: "task.failed", payload: { step: "implement", reason: "implement: No conversation found" } });
     });
 
     it("tests fail: that's a result, and the run still ends awaiting approval", async () => {
