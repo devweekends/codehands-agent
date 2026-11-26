@@ -43,7 +43,7 @@ export function trimNotes(text: string, maxLines = 200): string {
   return blocks.join("");
 }
 
-// Notes go to Claude as one CLI argument: Windows caps a command line near 32,000 characters, and every character costs tokens.
+// Every character of notes costs tokens, so the prompt only gets the end of them.
 const MAX_PROMPT_NOTES = 6000;
 
 // Newest notes win when it's too long. undefined, so no flag is passed at all, when there are none.

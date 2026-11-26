@@ -2,7 +2,7 @@ import type { RepoProfile } from "../memory/profile.js";
 import type { SandboxResult } from "../runtime/sandbox.js";
 
 // What each step asks. Pure functions, so a test can read every prompt without a model.
-// Caps keep each prompt well under Windows' 32,767-character command line.
+// Every character costs tokens, so what goes into each prompt is capped.
 
 export const MAX_FILES = 200;
 export const MAX_PATCH = 12_000;

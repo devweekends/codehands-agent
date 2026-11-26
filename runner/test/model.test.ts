@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { claudeModelArgs, createCannedModel, createClaudeModel, parseClaudeJson, type ModelRequest } from "../src/index.js";
+import { installs, TRICKY } from "./helpers/installs.js";
 
 const fake = fileURLToPath(new URL("./helpers/fake-claude-json.mjs", import.meta.url));
 const spike = fileURLToPath(new URL("./fixtures/spike-1.jsonl", import.meta.url));
@@ -11,11 +12,12 @@ const pair = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
 describe("claudeModelArgs", () => {
     it("asks for one plain answer: no tools, our system prompt, nothing saved", () => {
-        const a = claudeModelArgs(req, 0.2);
-        expect(pair(a, "-p")).toBe(req.prompt);
+        const a = claudeModelArgs(req, 0.2, "system.txt");
+        expect(a[0]).toBe("-p");
+        expect(a).not.toContain(req.prompt);
         expect(pair(a, "--output-format")).toBe("json");
         expect(pair(a, "--tools")).toBe("");
-        expect(pair(a, "--system-prompt")).toBe("You plan.");
+        expect(pair(a, "--system-prompt-file")).toBe("system.txt");
         expect(pair(a, "--model")).toBe("claude-haiku-5-5");
         expect(pair(a, "--max-budget-usd")).toBe("0.2");
         expect(a).toContain("--strict-mcp-config");
@@ -24,9 +26,13 @@ describe("claudeModelArgs", () => {
 });
 
 describe("createClaudeModel", () => {
-    it("passes the prompt through untouched, newlines and quotes included, and reads the cost", async () => {
-        const reply = await fakeModel("ok").complete(req);
-        expect(pair(JSON.parse(reply.text), "-p")).toBe(req.prompt);
+    it.each(installs)("passes both prompts through %s untouched, then removes the system file", async (_name, install) => {
+        const tricky = { ...req, system: `system ${TRICKY}`, prompt: `prompt ${TRICKY}` };
+        const reply = await createClaudeModel({ command: install(fake, ["ok"]) }).complete(tricky);
+        const got = JSON.parse(reply.text);
+        expect(got.input).toBe(tricky.prompt);
+        expect(got.system).toBe(tricky.system);
+        expect(existsSync(pair(got.args, "--system-prompt-file"))).toBe(false);
         expect(reply.costUsd).toBe(0.0012);
     });
 

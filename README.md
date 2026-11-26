@@ -35,7 +35,7 @@ sequenceDiagram
   R->>G: rev-parse HEAD (base commit)
   R->>G: worktree add -b codehands/<slug>-<id8> ~/.codehands/worktrees/<repoKey>/<id8>
   R->>R: save the repo profile, read the repo's notes (~/.codehands/memory/<repoKey>)
-  R->>C: spawn in the worktree, --output-format stream-json, notes as --append-system-prompt
+  R->>C: spawn in the worktree, --output-format stream-json, prompt on stdin, notes as --append-system-prompt-file
   loop every stdout line
     C-->>R: one JSON line
     R-->>D: task.started, message, file.read, file.changed, command.*, test.result
@@ -183,7 +183,7 @@ Some details that matter:
 
 `repoKey` is the first 12 characters of the SHA-1 of the repo's `origin` URL, or of its absolute path when there is no origin. Two clones of the same repo share a key.
 
-All of it stays on this machine. Memory reaches Claude only as `--append-system-prompt` on the same laptop. Nothing is synced or uploaded yet.
+All of it stays on this machine. Memory reaches Claude only as `--append-system-prompt-file` on the same laptop. Nothing is synced or uploaded yet.
 
 ## Safety rules
 

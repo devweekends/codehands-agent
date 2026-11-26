@@ -7,9 +7,12 @@ import type { EventSequence } from "../events.js";
 // --strict-mcp-config keeps the user's own connectors (Gmail, GitHub …) out of agent runs.
 const ALLOWED_TOOLS = "Read,Edit,Write,Glob,Grep,Bash(npm test:*),PowerShell(npm test:*)";
 
-export function claudeArgs(o: StartOptions, notes?: string): string[] {
+// The prompt is never an argument: it goes to Claude's stdin, and the notes go in a file.
+// On Windows an npm install is claude.cmd, and cmd.exe can't take a line break in an argument.
+// --append-system-prompt-file is missing from the --help option list. Checked against Claude Code 2.1.328.
+export function claudeArgs(o: StartOptions, notesFile?: string): string[] {
   const args = [
-    "-p", o.prompt,
+    "-p",
     "--session-id", o.sessionId,
     "--output-format", "stream-json", "--verbose",
     "--permission-mode", "acceptEdits",
@@ -18,13 +21,13 @@ export function claudeArgs(o: StartOptions, notes?: string): string[] {
     "--max-budget-usd", String(o.budgetUsd ?? 0.5),
   ];
   if (o.model) args.push("--model", o.model);
-  if (notes) args.push("--append-system-prompt", notes);
+  if (notesFile) args.push("--append-system-prompt-file", notesFile);
   return args;
 }
 
-export function claudeResumeArgs(sessionId: string, prompt: string, budgetUsd = 0.5): string[] {
+export function claudeResumeArgs(sessionId: string, budgetUsd = 0.5): string[] {
   return [
-    "-p", prompt,
+    "-p",
     "--resume", sessionId,
     "--output-format", "stream-json", "--verbose",
     "--permission-mode", "acceptEdits",

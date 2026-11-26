@@ -6,10 +6,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Runner, RunnerEvent, StartOptions } from "@codehands/contracts";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { createMemoryStub, createRunner, repoKey, type RunnerOptions } from "../src/index.js";
+import { createMemoryStub, createRunner, notesForPrompt, repoKey, type RunnerOptions } from "../src/index.js";
+import { claudeCommand, claudeResumeCommand, type AgentCommand } from "../src/runner.js";
+import { installs, TRICKY } from "./helpers/installs.js";
 
 // start() against a throwaway git repo. The agent is a script that replays spike-1.jsonl, so no API cost.
 const replay = fileURLToPath(new URL("./helpers/replay-agent.mjs", import.meta.url));
+const recorder = fileURLToPath(new URL("./helpers/record-claude.mjs", import.meta.url));
 const spike = fileURLToPath(new URL("./fixtures/spike-1.jsonl", import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), "codehands-runner-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -474,5 +477,88 @@ describe("runner memory", () => {
     const memory = createMemoryStub();
     const { repo } = await stoppedRun({ memory });
     expect(await memory.notes(await repoKey(repo))).toBe("");
+  });
+});
+
+// The real claude commands, run against a pretend claude that records what reaches it.
+describe.each(installs)("the claude command through %s", (_name, install) => {
+  const point = (c: AgentCommand): AgentCommand => {
+    expect(c.file).toBe("claude");
+    return { ...c, ...install(recorder)(c.args) };
+  };
+  function setup() {
+    // The notes file path goes on the command line, so it gets characters cmd.exe treats as special too.
+    const sessionRoot = mkdtempSync(join(tmp, "sessions & 100% "));
+    const real = claudeCommand(sessionRoot);
+    const memory = createMemoryStub();
+    const agentCommand: RunnerOptions["agentCommand"] = (o, notes) => point(real(o, notes));
+    const resumeCommand: RunnerOptions["resumeCommand"] = (o, prompt) => point(claudeResumeCommand(o, prompt));
+    return { sessionRoot, memory, agentCommand, resumeCommand };
+  }
+  const received = (events: RunnerEvent[]): { args: string[]; input: string; notes?: string } =>
+    JSON.parse(String(events.find((e) => e.type === "task.finished")!.payload.result));
+
+  it("gets the notes from an earlier run in the same repo", async () => {
+    const claude = setup();
+    const repo = makeRepo();
+    await collect(options(repo, { prompt: 'say "hi" & echo %PATH%' }), claude);
+    const saved = notesForPrompt(await claude.memory.notes(await repoKey(repo)))!;
+    expect(saved).toContain("\n");
+
+    const got = received(await collect(options(repo, { prompt: "Second task" }), claude));
+    expect(got.input).toBe("Second task");
+    expect(got.notes).toBe(saved);
+  });
+
+  it("gets a multi-line prompt exactly, on stdin and not as an argument", async () => {
+    const got = received(await collect(options(makeRepo(), { prompt: TRICKY }), setup()));
+    expect(got.input).toBe(TRICKY);
+    expect(got.args.join(" ")).not.toContain("line one");
+    expect(got.notes).toBeUndefined();
+  });
+
+  it("gets a multi-line prompt exactly on resume", async () => {
+    const { agentCommand: _hang, ...rest } = setup(); // stoppedRun brings its own agent, one that hangs
+    const { o, runner } = await stoppedRun(rest);
+    const got = received(await drain(runner.resume(o.sessionId, TRICKY)));
+    expect(got.input).toBe(TRICKY);
+    expect(got.args.slice(0, 3)).toEqual(["-p", "--resume", o.sessionId]);
+  });
+});
+
+describe("a launch error", () => {
+  const savedStatus = (sessionId: string) => JSON.parse(readFileSync(join(tmp, "sessions", `${sessionId}.json`), "utf8")).status;
+  const broken = (): never => {
+    throw new Error("cannot launch");
+  };
+
+  it("on start ends in task.failed and is saved as failed", async () => {
+    const o = options(makeRepo());
+    const events = await collect(o, { agentCommand: broken });
+    expect(events.at(-1)).toMatchObject({ type: "task.failed", payload: { reason: "could not start the agent: cannot launch" } });
+    expect(savedStatus(o.sessionId)).toBe("failed");
+  });
+
+  it("on resume ends in task.failed and is saved as failed", async () => {
+    const { o, runner } = await stoppedRun({ resumeCommand: broken });
+    const events = await drain(runner.resume(o.sessionId));
+    expect(events.map((e) => e.type)).toEqual(["task.failed"]);
+    expect(savedStatus(o.sessionId)).toBe("failed");
+  });
+
+  // Here execa itself throws, before there is any process. Only a .cmd on Windows makes it do that.
+  it.runIf(process.platform === "win32")("from execa refusing an argument is saved as failed", async () => {
+    const o = options(makeRepo());
+    const cmd = installs.at(-1)![1](recorder);
+    const events = await collect(o, { agentCommand: () => cmd(["two\nlines"]) });
+    expect(events.at(-1)!.payload.reason).toMatch(/could not start the agent: .*line break/);
+    expect(savedStatus(o.sessionId)).toBe("failed");
+  });
+
+  it("does not come from an agent that exits without reading a long prompt", async () => {
+    const events = await collect(options(makeRepo()), {
+      agentCommand: () => ({ file: process.execPath, args: [replay, spike], input: "x".repeat(1_000_000) }),
+    });
+    expect(events.at(-1)!.type).toBe("approval.requested");
   });
 });

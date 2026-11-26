@@ -1,4 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { StepName } from "@codehands/contracts";
 import { execa } from "execa";
 
@@ -28,12 +30,13 @@ export interface ClaudeModelOptions {
 
 // One plain answer from Claude Code: no tools, our own system prompt, nothing saved.
 // --tools "" means the model can only think and write, never touch files.
-export function claudeModelArgs(req: ModelRequest, budgetUsd: number): string[] {
+// As in claudeArgs, req.prompt goes to stdin and req.system goes in a file, not in the arguments.
+export function claudeModelArgs(req: ModelRequest, budgetUsd: number, systemFile: string): string[] {
     return [
-        "-p", req.prompt,
+        "-p",
         "--output-format", "json",
         "--tools", "",
-        "--system-prompt", req.system,
+        "--system-prompt-file", systemFile,
         "--model", req.model,
         "--strict-mcp-config",
         "--no-session-persistence",
@@ -45,16 +48,23 @@ export function claudeModelArgs(req: ModelRequest, budgetUsd: number): string[] 
 export function createClaudeModel({ budgetUsd = 0.2, command = (args) => ({ file: "claude", args }) }: ClaudeModelOptions = {}): ModelClient {
     return {
         async complete(req) {
-            const { file, args } = command(claudeModelArgs(req, budgetUsd));
-            // execa can still throw, before it even starts: when the program isn't found, Windows
-            // falls back to cmd.exe, which refuses a prompt with newlines in it.
-            let r;
+            // A new folder per call, so two calls at once never share a file.
+            const dir = await mkdtemp(join(tmpdir(), "codehands-model-"));
             try {
-                r = await execa(file, args, { cwd: tmpdir(), reject: false, stdin: "ignore", timeout: 5 * 60_000, windowsHide: true });
-            } catch (err) {
-                throw new Error(`claude could not start: ${(err as Error).message.split("\n")[0]}`);
+                const systemFile = join(dir, "system.txt");
+                await writeFile(systemFile, req.system);
+                const { file, args } = command(claudeModelArgs(req, budgetUsd, systemFile));
+                // execa can still throw before it starts, on arguments it refuses to run.
+                let r;
+                try {
+                    r = await execa(file, args, { cwd: tmpdir(), reject: false, input: req.prompt, timeout: 5 * 60_000, windowsHide: true });
+                } catch (err) {
+                    throw new Error(`claude could not start: ${(err as Error).message.split("\n")[0]}`);
+                }
+                return parseClaudeJson(String(r.stdout ?? ""), String(r.stderr ?? ""), r.exitCode);
+            } finally {
+                await rm(dir, { recursive: true, force: true }).catch(() => {});
             }
-            return parseClaudeJson(String(r.stdout ?? ""), String(r.stderr ?? ""), r.exitCode);
         },
     };
 }
