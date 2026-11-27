@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -24,8 +24,14 @@ export interface RunnerOptions {
   memory?: MemoryStore;     // default: files under ~/.codehands/memory. Tests pass createMemoryStub()
   // Which program to run for a task. Tests swap in a script that replays a recording.
   // notes: the repo's memory for the prompt, undefined when there is none.
-  agentCommand?: (o: StartOptions, notes?: string) => { file: string; args: string[] };
-  resumeCommand?: (o: StartOptions, prompt: string) => { file: string; args: string[] };
+  agentCommand?: (o: StartOptions, notes?: string) => AgentCommand;
+  resumeCommand?: (o: StartOptions, prompt: string) => AgentCommand;
+}
+
+export interface AgentCommand {
+  file: string;
+  args: string[];
+  input?: string;           // written to the program's stdin
 }
 
 // What recover() did. failed: sessions a restart interrupted, for the daemon to mark failed too.
@@ -49,16 +55,22 @@ export interface RecoverableRunner extends Runner {
   status(sessionId: string): SessionStatus | undefined;
 }
 
-const claudeCommand = (o: StartOptions, notes?: string) => ({ file: "claude", args: claudeArgs(o, notes) });
+// The real Claude commands. Exported for tests, which run them against a pretend claude.
+// The notes file sits next to the session record, outside the worktree, so it never shows in the diff.
+export const claudeCommand = (sessionRoot: string) => (o: StartOptions, notes?: string): AgentCommand => {
+  const notesFile = notes ? join(sessionRoot, `${o.sessionId}.notes.md`) : undefined;
+  if (notesFile) writeFileSync(notesFile, notes!);
+  return { file: "claude", args: claudeArgs(o, notesFile), input: o.prompt };
+};
 // start() passes our sessionId as Claude's --session-id, so the same id resumes it.
-const claudeResumeCommand = (o: StartOptions, prompt: string) =>
-  ({ file: "claude", args: claudeResumeArgs(o.sessionId, prompt, o.budgetUsd) });
+export const claudeResumeCommand = (o: StartOptions, prompt: string): AgentCommand =>
+  ({ file: "claude", args: claudeResumeArgs(o.sessionId, o.budgetUsd), input: prompt });
 
 export function createRunner({
   worktreeRoot,
   sessionRoot = join(homedir(), ".codehands", "sessions"),
   memory = createFileMemory(),
-  agentCommand = claudeCommand,
+  agentCommand = claudeCommand(sessionRoot),
   resumeCommand = claudeResumeCommand,
 }: RunnerOptions = {}): RecoverableRunner {
   const store = new SessionStore(sessionRoot);
@@ -105,24 +117,36 @@ export function createRunner({
     // Memory helps a run but must never fail one.
     const notes = await loadMemory(record.repoKey!, record.worktreePath!).catch(() => undefined);
     store.transition(o.sessionId, "running");
-    yield* runAgent(record, seq, agentCommand(o, notes));
+    yield* runAgent(record, seq, () => agentCommand(o, notes));
   }
 
   // Steps 2 to 5 of a run. start() and resume() share them, so a resumed run ends the same way.
-  async function* runAgent(record: SessionRecord, seq: EventSequence, { file, args }: { file: string; args: string[] }): AsyncIterable<RunnerEvent> {
+  async function* runAgent(record: SessionRecord, seq: EventSequence, command: () => AgentCommand): AsyncIterable<RunnerEvent> {
     const { sessionId } = record.options;
     const { worktreePath, baseCommit } = worktreeOf(sessionId);
     const { emit, fail } = emitters(record, seq);
     record.stopRequested = false;
 
     // 2. Run the agent inside the copy. reject: false, so a crash or a missing binary is a result, not a throw.
-    const child = execa(file, args, {
-      cwd: worktreePath,
-      stdin: "ignore",
-      reject: false,
-      buffer: { stdout: false, stderr: true },
-      windowsHide: true,
-    });
+    //    execa still throws on arguments it refuses to run, and so can command(). The catch covers both.
+    const launch = () => {
+      const { file, args, input } = command();
+      return execa(file, args, {
+        cwd: worktreePath,
+        // execa won't take stdin and input together.
+        ...(input === undefined ? { stdin: "ignore" as const } : { input }),
+        reject: false,
+        buffer: { stdout: false, stderr: true },
+        windowsHide: true,
+      });
+    };
+    let child: ReturnType<typeof launch>;
+    try {
+      child = launch();
+    } catch (err) {
+      yield fail(`could not start the agent: ${(err as Error).message}`);
+      return;
+    }
     record.pid = child.pid;
     exits.set(sessionId, child);
 
@@ -273,7 +297,7 @@ export function createRunner({
     // and the run ends the way start()'s does. If Claude never saved the session, it ends in task.failed.
     async *resume(sessionId, prompt = "Continue.") {
       const record = store.transition(sessionId, "running");
-      yield* runAgent(record, new EventSequence(sessionId, record.lastSeq), resumeCommand(record.options, prompt));
+      yield* runAgent(record, new EventSequence(sessionId, record.lastSeq), () => resumeCommand(record.options, prompt));
     },
     // The change since the base commit, new files included. Fresh each call while the worktree exists.
     async diff(sessionId) {
