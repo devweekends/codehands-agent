@@ -76,9 +76,10 @@ describe("parseClaudeLine", () => {
     expect(e!.payload.reason).toBe("error_max_budget_usd");
   });
 
-  it("maps a login failure reported as success to task.failed", () => {
+  it("maps a login failure reported as success to task.failed, with provider.status first", () => {
     const result = "Not logged in · Please run /login";
-    const [e] = replay([JSON.stringify({ type: "result", subtype: "success", is_error: false, result })]);
+    const [status, e] = replay([JSON.stringify({ type: "result", subtype: "success", is_error: false, result })]);
+    expect(status!).toMatchObject({ type: "provider.status", payload: { state: "auth_expired", message: result } });
     expect(e!.type).toBe("task.failed");
     expect(e!.payload.reason).toBe(result);
   });
@@ -88,6 +89,27 @@ describe("parseClaudeLine", () => {
     const [e] = replay([JSON.stringify({ type: "result", subtype: "success", is_error: false, result })]);
     expect(e!.type).toBe("task.finished");
     expect(e!.payload.reason).toBeUndefined();
+  });
+
+  it("a provider failure sends provider.status before task.failed", () => {
+    const result = "Claude AI usage limit reached|1794516000";
+    const out = replay([JSON.stringify({ type: "result", subtype: "success", is_error: true, result })]);
+    expect(out.map((e) => e.type)).toEqual(["provider.status", "task.failed"]);
+    expect(out[0]!.payload).toMatchObject({ state: "usage_limit", retryAt: "2026-11-12T20:40:00.000Z" });
+    expect(out[1]!.payload).toMatchObject({ reason: result, provider: "usage_limit" });
+  });
+
+  it("a rejected rate_limit_event sends provider.status once, and an allowed one nothing", () => {
+    const limit = (status: string) => JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status, rateLimitType: "five_hour", resetsAt: 1794516000 } });
+    const failed = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Claude AI usage limit reached|1794516000" });
+    const out = replay([limit("allowed"), limit("rejected"), failed]);
+    expect(out.map((e) => e.type)).toEqual(["provider.status", "task.failed"]);
+  });
+
+  it("a failure that isn't the provider's sends no provider.status", () => {
+    const out = replay([JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true })]);
+    expect(out.map((e) => e.type)).toEqual(["task.failed"]);
+    expect(out[0]!.payload.provider).toBeUndefined();
   });
 
   it("turns a malformed or half-finished line into a message with the raw text, and skips blank lines", () => {

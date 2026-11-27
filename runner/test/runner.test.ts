@@ -88,6 +88,14 @@ describe("runner.start", () => {
     expect(events[0]!.payload).toMatchObject({ reason: "the agent exited without a result", exitCode: 1 });
   });
 
+  it("logged out with no result line: provider.status from stderr, then task.failed", async () => {
+    const loggedOut: RunnerOptions["agentCommand"] = () => ({ file: process.execPath, args: ["-e", "process.stderr.write('Invalid API key · Please run /login'); process.exit(1)"] });
+    const events = await collect(options(makeRepo()), { agentCommand: loggedOut });
+    expect(events.map((e) => e.type)).toEqual(["provider.status", "task.failed"]);
+    expect(events[0]!.payload).toMatchObject({ state: "auth_expired" });
+    expect(events[1]!.payload).toMatchObject({ reason: "the agent exited without a result", provider: "auth_expired" });
+  });
+
   it("fails instead of crashing when the agent binary is missing", async () => {
     const events = await collect(options(makeRepo()), {
       agentCommand: () => ({ file: "codehands-no-such-binary", args: [] }),

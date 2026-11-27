@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import type { Runner, RunnerEvent, SessionStatus, StartOptions } from "@codehands/contracts";
 import { execa } from "execa";
 import { claudeArgs, claudeResumeArgs, newClaudeParseState, parseClaudeLine } from "./agents/claude-code.js";
+import { providerFailure } from "./agents/provider-status.js";
 import { EventSequence } from "./events.js";
 import { commitAll, diffSince } from "./git/diff.js";
 import { addWorktree, baseCommit, branchName, git, pruneWorktrees, removeWorktree, worktreePath } from "./git/worktree.js";
@@ -148,10 +149,15 @@ export function createRunner({
       return;
     }
     if (!finished) {
+      const stderr = String(result.stderr ?? "").slice(-2000);
+      // Logged out or offline often shows only on stderr, with no result line.
+      const provider = parseState.providerSent ? undefined : providerFailure(stderr);
+      if (provider) yield emit(seq.next("provider.status", { ...provider }));
       yield fail("the agent exited without a result", {
         exitCode: result.exitCode,
         error: result.failed ? result.shortMessage : undefined,
-        stderr: String(result.stderr ?? "").slice(-2000),
+        stderr,
+        provider: provider?.state,
       });
       return;
     }

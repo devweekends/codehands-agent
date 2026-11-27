@@ -78,6 +78,7 @@ Through week 4 (Nov 2026): the runner, the sandbox, the engine and crash resume.
 | `start`, `diff`, `approve`, `reject` | [runner/src/runner.ts](runner/src/runner.ts) | Done, tested with real runs |
 | `stop`: kill the whole process tree, keep the worktree | [runner/src/process/kill-tree.ts](runner/src/process/kill-tree.ts) | Done. `task.stopped` comes out of the `start()` stream; `stop()` resolves once the session is `stopped` |
 | `resume`: same worktree, `seq` continues | [runner/src/runner.ts](runner/src/runner.ts) | Done. Runs `claude -p --resume <sessionId>` through the same `runAgent()` as `start()`, so it ends in `awaiting_approval` or `task.failed` |
+| `provider.status`: why the provider can't serve a run | [runner/src/agents/provider-status.ts](runner/src/agents/provider-status.ts) | Done. Read from Claude Code's failed result, a rejected `rate_limit_event`, its stderr when it dies without a result, and the engine's own model calls. One per run, sent right before `task.failed`, which also carries `provider: <state>` |
 | Codex: `codex exec --json` to events | [runner/src/agents/codex.ts](runner/src/agents/codex.ts) | To do. `start()` with `agent: "codex"` fails cleanly for now |
 | `approval.requested` after `task.finished` | [runner/src/runner.ts](runner/src/runner.ts) | Done (contracts v0.2.0). Real and fake runners, never after a stop or a failure |
 | Repo memory: notes read before a run, a note added after | [runner/src/memory/](runner/src/memory/) | Done. `MemoryStore` with an in-memory stub and a file store. Stopped and failed runs add nothing, and a memory error never fails a run |
@@ -86,7 +87,7 @@ Through week 4 (Nov 2026): the runner, the sandbox, the engine and crash resume.
 | Engine: analyze → plan → implement → test → review | [runner/src/engine/](runner/src/engine/) | Done. `createEngine()` is a `Runner` for `agent: "codehands"`. Claude Code does implement through the runner, the sandbox does test, and one model call each does analyze, plan and review. Once the change exists, nothing after it throws it away: failing tests or a failed review still end in `awaiting_approval` |
 | Crash resume: kill the daemon, it finishes anyway | [runner/src/engine/run-store.ts](runner/src/engine/run-store.ts) | Done. The engine saves `run.json` before every event. After a restart, `engine.recover()` lists the runs a crash cut off, and `resume()` carries on from the first step that didn't finish: no step is paid for twice, Claude Code's own session is continued, `seq` never repeats, and `approve` waits for test and review |
 
-Next, from the [design](https://github.com/devweekends/codehands-docs#who-owns-what): a model per phase, naming provider errors as one `provider.status` event (`rate_limited`, `auth_expired`, `usage_limit`, `subscription_inactive`, `down`), memory and user preferences, and two models on one task.
+Next, from the [design](https://github.com/devweekends/codehands-docs#who-owns-what): memory and user preferences, and two models on one task.
 
 ## Using it
 
@@ -120,6 +121,7 @@ const { branch, commit } = await runner.approve(sessionId, "Fix the date bug");
 | `createRunner(options?)` | The real runner. `worktreeRoot` overrides `~/.codehands/worktrees`. `sessionRoot` overrides `~/.codehands/sessions`. `memory` swaps where repo memory lives (default: files under `~/.codehands/memory`). `agentCommand` swaps the program it runs, which is how the tests replay a recording instead of calling Claude |
 | `createFakeRunner({ delayMs? })` | Emits 12 scripted events, 300 ms apart, then `approval.requested`, and supports every method including stop and resume. Costs nothing, needs no repo. Build against it, and keep it as the demo backup |
 | `EventSequence` | Hands out events with the next `seq` |
+| `providerFailure(text)`, `rateLimitRejected(info)`, `ProviderStatus` | Turn a failure's text, or a `rate_limit_event`, into a `provider.status` payload: `{ state, message, code?, retryAt? }`. `undefined` when the failure isn't the provider's |
 | `SessionStore`, `SessionRecord` | Session records with the legal-move check from the contracts. Saved as files when given a root, otherwise in memory (the fake runner) |
 | `RecoverableRunner`, `RecoveryReport`, `RecoverOptions` | What `createRunner` and `createEngine` return: the contract's `Runner` plus `recover()`, `worktree()` and `status()`. `recover({ keep })` keeps a running session its owner will continue as `stopped` instead of failing it, and lists it in `report.resumable` |
 | `createEngine(options?)`, `EngineOptions`, `modelFor`, `DEFAULT_MODEL` | The engine. `runner`, `model`, `sandbox`, `memory` and `runsRoot` can each be swapped, which is how the tests run it for $0. `modelFor(o, step)`: the step's own model, then the run's, then the default |
@@ -155,9 +157,10 @@ Each stdout line from `claude -p --output-format stream-json --verbose` is one J
 | `assistant` tool use: Edit, Write, MultiEdit, NotebookEdit | `file.changed` |
 | `assistant` tool use: Bash, PowerShell | `command.started` |
 | `user` tool result for a command | `command.finished`, plus `test.result` when the command was a test run |
-| `result` | `task.finished`, or `task.failed` when it is an error |
+| `result` | `task.finished`, or `task.failed` when it is an error. A failure that is the provider's sends `provider.status` first |
+| `rate_limit_event` with `status: "rejected"` | `provider.status`: `usage_limit` for a plan window (`five_hour`, `seven_day`), otherwise `rate_limited`, with `retryAt` |
 | A line that is not JSON | `message` with the raw text |
-| `rate_limit_event`, thinking, other system lines | Skipped |
+| Other `rate_limit_event`s, thinking, other system lines | Skipped |
 
 Some details that matter:
 
@@ -250,6 +253,7 @@ The scripts in `runner/scripts/`:
 | [runner.test.ts](runner/test/runner.test.ts) | A worktree on a new branch with your repo untouched; clean failures for a repo with no commits, an agent with no result line, a missing binary and an unsupported agent; diff with new files; approve commits on the branch and leaves `main` alone; reject deletes the branch; nothing to approve; stop kills the agent and its children, keeps the worktree and refuses a session that is not running; resume continues the numbering, passes the prompt, can be stopped again and refuses a session that is not stopped; `approval.requested` right after `task.finished`; memory: the second run gets the first run's note, the profile is saved, and failed or stopped runs add no note; after a restart: approve, reject, diff and resume still work, and `recover()` fails interrupted sessions, removes their worktrees, keeps branches with commits, leaves live sessions alone, and reports what it can't clean or read; `recover({ keep })` keeps a session as `stopped` and it resumes; `status()` |
 | [engine.test.ts](runner/test/engine.test.ts) | The five steps in order ending in `awaiting_approval`; Claude Code's events tagged with the step; each step gets the one before; model per step; a file per step and `run.json`; wrong agent and a repo with no commits; analyze, implement, tests, sandbox and review failing, with the change kept once it exists; Claude Code's own failure says why; approve waits for the whole run; reject; stop during implement and resume; tests run in the worktree with the change |
 | [engine-recover.test.ts](runner/test/engine-recover.test.ts) | A crash at every point: during analyze, after plan, during implement (Claude Code's session continued), right after Claude Code finished, during review, between `task.finished` and `approval.requested`. Each time no finished step runs again and `seq` carries on. Approve refused until the run finishes; finished and failed runs not resumed; a run stopped before the restart still resumes; a second resume refused; `RunStore` never reads outside its folder |
+| [provider-status.test.ts](runner/test/provider-status.test.ts) | Each of Claude Code's failure texts to its state: logged out, expired token, no credit, usage limit with its reset time, 429, 5xx, 529, timeouts. Budget caps, a missing binary and a 400 are not the provider's. Allowed rate limit events say nothing |
 | [session-store.test.ts](runner/test/session-store.test.ts) | A new store finds what the old one saved; the pid is never saved; moves are still checked after loading; ids that aren't plain names never reach the disk; no root means memory only |
 | [fake-runner.test.ts](runner/test/fake-runner.test.ts) | Event order and `seq`; approve only after finishing; stop then resume with `seq` continuing; no `approval.requested` after a stop |
 | [memory.test.ts](runner/test/memory.test.ts) | The stub keeps notes in order and repos apart; trimming drops whole notes and keeps the newest; the prompt cap keeps the newest end; a note's summary stays on one line; the file store reads back from disk and treats missing files as empty |
@@ -265,6 +269,8 @@ To record a new fixture, run `scripts/spike.sh` (or a Codex equivalent), read ev
 | Symptom | Cause and fix |
 | --- | --- |
 | `task.failed`: "is not a git repo or has no commits yet" | Worktrees need a commit to branch from. Commit something first |
+| `provider.status` with `auth_expired` | Run `claude` once in a terminal and log in again |
+| `provider.status` with `usage_limit` or `rate_limited` | Wait until `retryAt`, or use the other agent |
 | `task.failed`: "the agent exited without a result" | `claude` is not installed, not on `PATH`, or not logged in. `stderr` on the event says which |
 | `fatal: '<branch>' is already checked out` or a worktree already exists | A previous run was left behind. Run `scripts/reset-fixture.sh`, or `git worktree prune` in the repo |
 | Cannot find module `@codehands/contracts` | Build the contracts repo first, and check it is cloned next to `codehands-agent` |

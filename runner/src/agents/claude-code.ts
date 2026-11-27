@@ -1,5 +1,6 @@
 import type { RunnerEvent, StartOptions } from "@codehands/contracts";
 import type { EventSequence } from "../events.js";
+import { providerFailure, rateLimitRejected } from "./provider-status.js";
 
 // Week 1 guide, section 4. Flags checked against Claude Code 2.1.280.
 
@@ -44,8 +45,11 @@ export function claudeResumeArgs(sessionId: string, prompt: string, budgetUsd = 
 //   user tool_result for a command  -> command.finished (+ test.result for a test command)
 //   result                          -> task.finished, or task.failed when it is an error
 //                                      or a login failure reported as success.
-//                                      total_cost_usd and usage exactly as given
-// Skipped: rate_limit_event (can come before init), thinking, other system lines.
+//                                      total_cost_usd and usage exactly as given.
+//                                      A failure that is the provider's (logged out, limits, down)
+//                                      also sends provider.status first
+//   rate_limit_event "rejected"     -> provider.status (rate_limited or usage_limit, with retryAt)
+// Skipped: other rate_limit_events (can come before init), thinking, other system lines.
 // A line that is not JSON becomes a `message` with the raw text. Always keep `raw`.
 // One line can hold several content blocks, so this returns a list.
 
@@ -63,6 +67,7 @@ const AUTH_FAILURE = /^\s*(not logged in|invalid api key)\b.*please run \/login\
 export interface ClaudeParseState {
   tools: Map<string, { name: string; command?: string }>;
   denied: Set<string>;      // tool_use ids that were blocked and never ran
+  providerSent?: boolean;   // provider.status already went out: one per run is enough
 }
 
 export function newClaudeParseState(): ClaudeParseState {
@@ -84,6 +89,13 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
     return [seq.next("task.started", {
       agent: "claude-code", model: o.model, cwd: o.cwd, agentSessionId: o.session_id, permissionMode: o.permissionMode,
     }, o)];
+  }
+
+  if (o.type === "rate_limit_event") {
+    const status = rateLimitRejected(o.rate_limit_info);
+    if (!status || state.providerSent) return [];
+    state.providerSent = true;
+    return [seq.next("provider.status", { ...status }, o)];
   }
 
   if (o.type === "system" && o.subtype === "permission_denied") {
@@ -129,7 +141,13 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
   if (o.type === "result") {
     const summary = typeof o.result === "string" ? o.result : "";
     const failed = o.is_error === true || o.subtype !== "success" || AUTH_FAILURE.test(summary);
-    return [seq.next(failed ? "task.failed" : "task.finished", {
+    const provider = failed ? providerFailure(summary) : undefined;
+    const events: RunnerEvent[] = [];
+    if (provider && !state.providerSent) {
+      state.providerSent = true;
+      events.push(seq.next("provider.status", { ...provider }, o));
+    }
+    events.push(seq.next(failed ? "task.failed" : "task.finished", {
       subtype: o.subtype,
       total_cost_usd: o.total_cost_usd,
       duration_ms: o.duration_ms,
@@ -137,8 +155,10 @@ export function parseClaudeLine(line: string, seq: EventSequence, state = newCla
       usage: o.usage,
       result: o.result,
       reason: failed ? summary || o.subtype : undefined,
+      provider: provider?.state,
       agentSessionId: o.session_id,
-    }, o)];
+    }, o));
+    return events;
   }
 
   return [];

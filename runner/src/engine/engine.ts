@@ -7,6 +7,7 @@ import { baseCommit, git } from "../git/worktree.js";
 import { createFileMemory, repoKey } from "../memory/notes.js";
 import { detectRepoProfile } from "../memory/profile.js";
 import { notesForPrompt, type MemoryStore } from "../memory/store.js";
+import { providerFailure } from "../agents/provider-status.js";
 import { createRunner, type RecoverableRunner, type RecoveryReport } from "../runner.js";
 import { runInSandbox, type SandboxOptions, type SandboxResult } from "../runtime/sandbox.js";
 import { createClaudeModel, type ModelClient } from "./model.js";
@@ -109,6 +110,9 @@ export function createEngine({
         } catch (err) {
             const reason = (err as Error).message;
             await saveStep(run, step, { ok: false, model: m, durationMs: Date.now() - started, input: p, error: reason });
+            // Logged out, out of usage or down: say so, so the app can tell the person what to do.
+            const provider = providerFailure(reason);
+            if (provider) yield emit(run, "provider.status", { step, ...provider });
             yield emit(run, "step.finished", { step, ok: false });
             return { ok: false, reason };
         }

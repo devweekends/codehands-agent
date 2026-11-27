@@ -161,6 +161,13 @@ describe("engine when something goes wrong", () => {
         expect(engine.worktree(o.sessionId)).toBeUndefined();
     });
 
+    it("a step the provider can't serve says why with provider.status", async () => {
+        const { engine } = setup({ model: createCannedModel({ analyze: new Error("claude failed: Claude AI usage limit reached|1794516000") }) });
+        const events = await drain(engine.start(options(makeRepo())));
+        expect(events.map((e) => e.type)).toEqual(["task.started", "step.started", "provider.status", "step.finished", "task.failed"]);
+        expect(events[2]!.payload).toMatchObject({ step: "analyze", state: "usage_limit", retryAt: "2026-11-12T20:40:00.000Z" });
+    });
+
     it("implement fails: the run fails at implement", async () => {
         const empty = join(tmp, "empty.jsonl");
         writeFileSync(empty, "");
